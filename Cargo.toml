@@ -1,0 +1,13 @@
+[package]
+name = "jbash"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2.189"
+nix = { version = "0.29", features = ["term", "process", "poll", "signal", "ioctl", "fs"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true
