@@ -188,8 +188,16 @@ def lint_text() -> None:
         if b"\r" in data:
             bad.append("{} (CRLF line endings)".format(rel))
         text = data.decode("utf-8", "replace")
-        if any(line != line.rstrip() for line in text.split("\n")):
+        for line in text.split("\n"):
+            trail = line[len(line.rstrip()):]
+            if not trail:
+                continue
+            # Markdown encodes a hard line break as exactly two trailing spaces;
+            # anything else trailing is an accident.
+            if rel.endswith(".md") and trail == "  ":
+                continue
             bad.append("{} (trailing whitespace)".format(rel))
+            break
         if text and not text.endswith("\n"):
             bad.append("{} (missing final newline)".format(rel))
     report("text", "PASS" if not bad else "FAIL",

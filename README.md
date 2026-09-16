@@ -42,7 +42,7 @@ jbash fix   (after a command fails: the AI explains and proposes a fix)
 ```
 
 While the AI is working, jbash streams the reply and shows an *animated
-spinner* with the active model name plus a live token count. Press 
+spinner* with the active model name plus a live token count. Press
 **Ctrl+C** at any time to abort the request and get your prompt back.
 
 ```
@@ -88,8 +88,8 @@ spinner* with the active model name plus a live token count. Press
   SSH keys / GPG keyrings / cloud credentials / git credential stores / `.env`
   files are refused, and secret-shaped content is redacted from the output
   before the model sees it (see [Security](#security)).
-- **Live token usage**: The approximate count updates as tokens arrive; when the 
-  stream finishes the exact total (i.e.; `· 88 tok`) flashes for a moment and the 
+- **Live token usage**: The approximate count updates as tokens arrive; when the
+  stream finishes the exact total (i.e.; `· 88 tok`) flashes for a moment and the
   line is cleared. This only appears while the model is called, never
   during normal commands. Because the progress is drawn by the Rust process
   itself rather than a background shell helper, **Ctrl+C aborts cleanly**: no
@@ -192,6 +192,26 @@ slow one delays each and every prompt. Changes take effect on the next
 
 ## Install
 
+### Prebuilt binary (no toolchain needed)
+
+Tagged releases publish Linux binaries for `x86_64` and `aarch64`, each with a
+SHA-256 checksum, on the [releases page](https://github.com/eightmail/jbash/releases):
+
+```sh
+ver=v0.8.0-alpha
+arch=x86_64          # or aarch64
+base="https://github.com/eightmail/jbash/releases/download/${ver}"
+curl -LO "${base}/jbash-${ver}-${arch}-unknown-linux-gnu.tar.gz"
+curl -LO "${base}/jbash-${ver}-${arch}-unknown-linux-gnu.tar.gz.sha256"
+sha256sum -c "jbash-${ver}-${arch}-unknown-linux-gnu.tar.gz.sha256"
+tar -xzf "jbash-${ver}-${arch}-unknown-linux-gnu.tar.gz"
+install -Dm755 jbash ~/.local/bin/jbash
+```
+
+The `mkdir -p ~/.local/bin && install -m 755 jbash ~/.local/bin/jbash` works on both 
+GNU and BSD `install` (BSD has no `-D`), so the same last two lines work on macOS. 
+Note the published artifacts are Linux-only for now; on macOS, build from source below.
+
 ### With the install script
 
 ```sh
@@ -222,6 +242,29 @@ jbash
 ai off   # to avoid interference while you set things up
 ```
 
+## Versioning and releases
+
+jbash follows [Semantic Versioning](https://semver.org/): releases are tagged
+`vMAJOR.MINOR.PATCH`, optionally with a pre-release suffix such as
+`v0.8.0-alpha`. The version reported by `jbash --version` is read straight from
+`Cargo.toml`, and the release workflow refuses to publish a tag that does not
+match it, so a tag and its binary can never disagree.
+
+Pre-release tags (any version containing a hyphen, e.g. `v0.8.0-alpha`) are
+published as GitHub **pre-releases**.
+
+To cut a release:
+
+```sh
+# bump `version` in Cargo.toml and add a CHANGELOG.md entry, then:
+git tag v0.8.0-alpha
+git push origin v0.8.0-alpha
+```
+
+That push runs `.github/workflows/release.yml`, which builds the Linux
+binaries, writes SHA-256 checksums, and attaches them to a new GitHub release.
+Changes between releases are listed in [CHANGELOG.md](CHANGELOG.md).
+
 ## Usage
 
 ```
@@ -234,6 +277,7 @@ jbash -c 'command'           run a command once with the plain shell
 jbash --install              symlink into ~/.local/bin/jbash
 jbash --sleeper              force sandboxed AI tool execution (on by default)
 jbash --activated            disable the sandbox for AI tool commands
+jbash -V, --version          print the version and exit
 ```
 
 Interactive-only commands (inside an `jbash` session):
@@ -292,6 +336,10 @@ jbash keeps its session state there:
   shell functions simply call the `jbash` binary in `--plain` mode with the raw
   text; a `command_not_found_handle` turns any unknown command into an
   ask/run/skip menu.
+- **Built-in system prompts**: every request carries a fixed system prompt that
+  steers the model. The command-writing rules (the `Rules:` block) live in the
+  `SYS_CMD` constant in `src/shell.rs`; `SYS_ASK` and `SYS_FIX` cover the
+  question and repair channels.
 - **Prompt themes**: `__jbash_seg_*` helpers render the Git branch (only inside
   a work tree), dirty state (`✗`/`●`), last-command duration, virtualenv, and
   exit code. `JBASH_THEME` selects `default`, `modern` (two lines), or
@@ -352,7 +400,7 @@ so the `run_shell` tool is confined by three layered guards (`src/sandbox.rs`):
    model.
 
 Two deliberate caveats. First, these layers are heuristics, not a kernel
-boundary: jbash runs without privileges and (on common hardened hosts) 
+boundary: jbash runs without privileges and (on common hardened hosts)
 without unprivileged user namespaces, so a command that knows an
 absolute path outside your home (say `/home/you/elsewhere/notes`) can still
 read that file, and there is no network sandbox. The guards close off the
@@ -364,9 +412,9 @@ command, it executes in your real shell with your real environment, exactly
 as if you had typed it. Set `sandbox=0` in `~/.jbash_rc` (or
 `JBASH_SANDBOX=0`) to run tool commands unsandboxed.
 
-**NOTE:** This may be obvious, but please take care to use *https* in the 
-config when connectng to a remote LLM endpoint, so that data cannot be 
-intercepted over the network. Use *http* if the LLM endpoint is 
+**NOTE:** This may be obvious, but please take care to use *https* in the
+config when connectng to a remote LLM endpoint, so that data cannot be
+intercepted over the network. Use *http* if the LLM endpoint is
 in fact 'localhost'.  
 
 **Choosing at runtime.** The sandbox is the default, but the mode can be
@@ -426,6 +474,7 @@ rm -rf ~/.jbash
 
 ## ToDo
 
-- Improve security and mitigate the inherent dangers imposed by Remote Code 
+- Improve security and mitigate the inherent dangers imposed by Remote Code
   Execution (RCE) / Prompt Injection, coupled with system and file access.
-
+- Make the built-in system prompts modular so that they can be modified. Perhaps
+  read from a JSON file in '~/.local/jbash'.

@@ -141,6 +141,7 @@ fn print_help() {
          \x20 jbash --install              symlink into ~/.local/bin/jbash\n\
          \x20 jbash --sleeper               force sandboxed AI tool execution (on by default)\n\
          \x20 jbash --activated             disable the sandbox: AI tools get full access\n\
+         \x20 jbash -V, --version           print the version and exit\n\
          \n\
          Config file: ~/.jbash_rc  (api_url, model, sandbox, shell, confirm, context, timeout, temp, prompt_name, theme)"
     );
@@ -218,6 +219,7 @@ fn main() {
     // this point.
     match args[0].as_str() {
         "-h" | "--help" | "help" => print_help(),
+        "-V" | "--version" => println!("jbash {}", env!("CARGO_PKG_VERSION")),
         "--install" => install(),
         "-c" => {
             let cmd = args.get(1).cloned().unwrap_or_default();
