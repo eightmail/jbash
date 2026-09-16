@@ -3,7 +3,7 @@
 ## TLDR:
 A work in progress.
 
-## ⚠️  JSON Bourne is DANGEROUS: Security Warning & Risk Disclosure
+## ⚠️ JSON Bourne is DANGEROUS: Security Warning & Risk Disclosure  
 
 **Use this tool with extreme caution:** running AI-generated commands directly on your local system carries inherent risks:
 
