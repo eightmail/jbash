@@ -132,8 +132,8 @@ fn print_help() {
          \x20 jbash fix [cmd] [status]     explain + propose a fix for the failed command\n\
          \x20 jbash -c 'command'           run a command once with the plain shell\n\
          \x20 jbash --install              symlink into ~/.local/bin/jbash\n\
-         \x20 jbash --sandbox              force sandboxed AI tool execution (on by default)\n\
-         \x20 jbash --insecure             disable the sandbox: AI tools get full access\n\
+         \x20 jbash --sleeper               force sandboxed AI tool execution (on by default)\n\
+         \x20 jbash --activated             disable the sandbox: AI tools get full access\n\
          \n\
          Config file: ~/.jbash_rc  (api_url, model, sandbox, shell, confirm, context, timeout, temp, prompt_name, theme)"
     );
@@ -159,18 +159,21 @@ fn install() {
     }
 }
 
-// The sandbox override switches. They are stripped out of argv before the
+// The sandbox override switches.   They are stripped out of argv before the
 // subcommand dispatch so they never leak into the text sent to the AI, and
 // their effect (on/off) is baked straight into the config, just like a
-// JBASH_SANDBOX env override. If both appear, the last one wins.
+// JBASH_SANDBOX env override.   If several appear, the last one wins.
+// `--sleeper` is sandboxed (the default); `--activated` runs tool commands
+// with full access.   The old `--sandbox`/`--insecure` spellings still work
+// as deprecated aliases so sessions started by an older rc keep working.
 fn apply_sandbox_flags(cfg: &mut config::Config, raw: Vec<String>) -> Vec<String> {
     raw.into_iter()
         .filter(|a| match a.as_str() {
-            "--sandbox" => {
+            "--sleeper" | "--sandbox" => {
                 cfg.sandbox = true;
                 false
             }
-            "--insecure" => {
+            "--activated" | "--insecure" => {
                 cfg.sandbox = false;
                 false
             }
@@ -192,7 +195,7 @@ fn main() {
         let stdout_is_tty = isatty(1).unwrap_or(false);
         if stdin_is_tty && stdout_is_tty {
             if !cfg.sandbox {
-                eprintln!("jbash: warning: sandbox disabled (--insecure): the AI's tool commands will run with unrestricted access to your home, keys and other secrets.");
+                eprintln!("jbash: warning: sandbox disabled (--activated): the AI's tool commands will run with unrestricted access to your home, keys and other secrets. The prompt indicator shows a red dot while this session runs activated.");
             }
             exit(shell::interactive(&cfg));
         }
@@ -278,17 +281,17 @@ mod cli_tests {
     }
 
     #[test]
-    fn insecure_switches_sandbox_off() {
+    fn activated_switches_sandbox_off() {
         let mut cfg = Config::default();
-        let kept = scrape(&mut cfg, &["--insecure", "ai", "hello"]);
+        let kept = scrape(&mut cfg, &["--activated", "ai", "hello"]);
         assert!(!cfg.sandbox);
         assert_eq!(kept, vec!["ai", "hello"]);
     }
 
     #[test]
-    fn sandbox_switch_keeps_sandbox_on() {
+    fn sleeper_switch_keeps_sandbox_on() {
         let mut cfg = Config::default();
-        let kept = scrape(&mut cfg, &["--sandbox", "ask", "x"]);
+        let kept = scrape(&mut cfg, &["--sleeper", "ask", "x"]);
         assert!(cfg.sandbox);
         assert_eq!(kept, vec!["ask", "x"]);
     }
@@ -296,23 +299,34 @@ mod cli_tests {
     #[test]
     fn last_flag_wins() {
         let mut cfg = Config::default();
-        let kept = scrape(&mut cfg, &["--insecure", "--sandbox", "fix"]);
+        let kept = scrape(&mut cfg, &["--activated", "--sleeper", "fix"]);
         assert!(cfg.sandbox);
         assert_eq!(kept, vec!["fix"]);
 
         let mut cfg = Config::default();
-        let kept = scrape(&mut cfg, &["--sandbox", "--insecure", "-c"]);
+        let kept = scrape(&mut cfg, &["--sleeper", "--activated", "-c"]);
         assert!(!cfg.sandbox);
         assert_eq!(kept, vec!["-c"]);
     }
 
     #[test]
+    fn deprecated_aliases_still_work() {
+        let mut cfg = Config::default();
+        let _ = scrape(&mut cfg, &["--insecure", "ask"]);
+        assert!(!cfg.sandbox);
+
+        let mut cfg = Config::default();
+        let _ = scrape(&mut cfg, &["--sandbox", "ask"]);
+        assert!(cfg.sandbox);
+    }
+
+    #[test]
     fn flags_once_inside_the_text_are_left_alone() {
         let mut cfg = Config::default();
-        let kept = scrape(&mut cfg, &["ask", "note: the word --sandbox is just prose"]);
+        let kept = scrape(&mut cfg, &["ask", "note: the word --sleeper is just prose"]);
         assert!(cfg.sandbox);
         // The whole sentence is a single argv token, so nothing was stripped.
         assert_eq!(kept.len(), 2);
-        assert!(kept[1].contains("--sandbox"));
+        assert!(kept[1].contains("--sleeper"));
     }
 }

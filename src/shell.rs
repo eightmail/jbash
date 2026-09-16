@@ -128,7 +128,11 @@ fn sq(s: &str) -> String {
 // with a different provider). The theme's colours colour the prompt name
 // and the working directory, and a `newline` theme puts a blank line before
 // the prompt itself, starship-style.
-fn prompt_script(theme: &Theme, plugins: &[Plugin]) -> String {
+//
+// A tiny mode indicator is glued right behind the prompt name so there is
+// never any doubt which sandbox state this session is in: green dot when the
+// AI's tool commands are sandboxed, red dot when they run --activated.
+fn prompt_script(theme: &Theme, plugins: &[Plugin], sandboxed: bool) -> String {
     let mut segs: Vec<String> = theme
         .segments
         .iter()
@@ -161,6 +165,8 @@ fn prompt_script(theme: &Theme, plugins: &[Plugin]) -> String {
     }
     let body = segs.join("\n  ");
     let nl = if theme.newline { "\\n" } else { "" };
+    // 92 is bright green (sandboxed), 91 is bright red (activated/insecure).
+    let dot_color = if sandboxed { "92" } else { "91" };
 
     format!(
         r#"
@@ -170,13 +176,14 @@ __jbash_prompt() {{
   rc="$(cat "$JBASH_DIR/last-status" 2>/dev/null || echo 0)"
   info=""
   {body}
-  PS1="{nl}${{info}}\[\e[{nc}m\]$JBASH_NAME\[\e[0m\] \[\e[{pc}m\]$dir\[\e[0m\]> "
+  PS1="{nl}${{info}}\[\e[{nc}m\]$JBASH_NAME\[\e[0m\]\[\e[{dc}m\]●\[\e[0m\] \[\e[{pc}m\]$dir\[\e[0m\]> "
 }}
 "#,
         nl = nl,
         body = body,
         nc = theme.name_color,
         pc = theme.path_color,
+        dc = dot_color,
     )
 }
 
@@ -188,9 +195,10 @@ __jbash_run() {
   local fun="$1"; shift
   local out yn jbs
   # forward the session's sandbox choice so the child binary honours it too.
-  # The interactive launch wrote it into $JBASH_DIR/sandbox ('1' sandboxed,
-  # '0' insecure); sandboxed is also what a missing file defaults to.
-  [ "$(cat "$JBASH_DIR/sandbox" 2>/dev/null || echo 1)" = 0 ] && jbs=--insecure || jbs=--sandbox
+  # The interactive launch wrote it into $JBASH_DIR/sandbox-mode ('1'
+  # sandboxed / --sleeper, '0' activated); sandboxed is what a missing file
+  # defaults to.
+  [ "$(cat "$JBASH_DIR/sandbox-mode" 2>/dev/null || echo 1)" = 0 ] && jbs=--activated || jbs=--sleeper
   # progress (spinner + token usage) is drawn by the Rust helper itself
   if ! out="$( "$JBASH_BIN" "$fun" --plain "$jbs" "$@" )"; then
     return $?
@@ -218,7 +226,7 @@ ask() {
   local jbs
   if [ -n "$1" ]; then
     # forward the session's sandbox choice, like __jbash_run does
-    [ "$(cat "$JBASH_DIR/sandbox" 2>/dev/null || echo 1)" = 0 ] && jbs=--insecure || jbs=--sandbox
+    [ "$(cat "$JBASH_DIR/sandbox-mode" 2>/dev/null || echo 1)" = 0 ] && jbs=--activated || jbs=--sleeper
     # ask prints its own answer directly; nothing to confirm or eval here.
     "$JBASH_BIN" ask --plain "$jbs" "$@"
   fi
@@ -289,7 +297,7 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
         user_rc = "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi",
         prompt = {
             let (theme, plugins) = ecosystem::load(cfg);
-            format!("{}{}{}", prompt_script(&theme, &plugins), SEGMENTS_BASH, PROMPT_TAIL)
+            format!("{}{}{}", prompt_script(&theme, &plugins, cfg.sandbox), SEGMENTS_BASH, PROMPT_TAIL)
         },
         helpers = HELPERS_BASH,
     );
@@ -450,12 +458,14 @@ pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected comm
 pub fn interactive(cfg: &Config) -> i32 {
     let dir = config::data_dir();
     let _ = fs::create_dir_all(&dir);
-    // AI interception is on by default each session; `ai off` flips state.
+// AI interception is on by default each session; `ai off` flips state.
     let _ = fs::write(dir.join("state"), "on");
-    // Persist the sandbox choice for the session too. The rc helpers read it
-    // so every `ai`/`ask`/`fix` call the shell makes re-applies the exact
-    // --sandbox/--insecure the user launched with (default: sandboxed).
-    let _ = fs::write(dir.join("sandbox"), if cfg.sandbox { "1" } else { "0" });
+    // Persist the sandbox choice for the session too.   The rc helpers read it
+    // so every `ai`/`ask`/`fix` call the shell makes re-applies exactly the
+    // --sleeper/--activated the user launched with (default: sandboxed).
+    // Named "sandbox-mode" on purpose: $JBASH_DIR/sandbox is already the
+    // scratch tree that the tool sandbox creates, and the two must not clash.
+    let _ = fs::write(dir.join("sandbox-mode"), if cfg.sandbox { "1" } else { "0" });
     // A fresh interactive session starts with an empty transcript. Context
     // across sessions would just confuse the model with stale topics.
     context::reset(&dir);
