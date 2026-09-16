@@ -1,10 +1,10 @@
 // The shell half of jbash.
 //
-// This is where the "it's just bash underneath" promise is actually kept.
+// This is where we keep it just bash underneath.
 // We allocate a pty, fork a real `bash` onto its slave side with a generated
 // rc file, and then play phone operator: every byte the user types goes to
 // bash, every byte bash produces comes back, and the terminal window size is
-// mirrored so full-screen programs still work.   The rc file it injects is
+// mirrored so full-screen programs still work. The rc file it injects is
 // where the product actually lives: the themed prompt, the ai/ask/fix
 // wrappers, the error capture, the command_not_found interception.
 use crate::config::{self, Config};
@@ -23,7 +23,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// jbash exists to wrap bash, full stop.   The config may still carry a legacy
+// jbash exists to wrap bash, full stop. The config may still carry a legacy
 // "shell=" key, but we never honour it: reimplementing another engine is
 // exactly what this project refuses to do.
 pub fn resolve_shell(_cfg: &Config) -> String {
@@ -35,7 +35,7 @@ fn rc_file_name() -> &'static str {
 }
 
 // Quote for single-quoted shell context (used when embedding values into the
-// generated rc).   The `'\''` dance is the standard way to close the quote,
+// generated rc). The `'\''` dance is the standard way to close the quote,
 // emit a literal quote, and reopen: ugly but bulletproof.
 fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -122,10 +122,10 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-// Generate the __jbash_prompt body for the active theme.   Each configured
+// Generate the __jbash_prompt body for the active theme. Each configured
 // segment becomes one `__jbash_seg_*` call folded into a local `info`
 // variable; plugin segments are appended the same way (they are just segments
-// with a different provider).   The theme's colours colour the prompt name
+// with a different provider). The theme's colours colour the prompt name
 // and the working directory, and a `newline` theme puts a blank line before
 // the prompt itself, starship-style.
 fn prompt_script(theme: &Theme, plugins: &[Plugin]) -> String {
@@ -186,9 +186,13 @@ __jbash_prompt() {{
 const HELPERS_BASH: &str = r#"
 __jbash_run() {
   local fun="$1"; shift
-  local out yn
+  local out yn jbs
+  # forward the session's sandbox choice so the child binary honours it too.
+  # The interactive launch wrote it into $JBASH_DIR/sandbox ('1' sandboxed,
+  # '0' insecure); sandboxed is also what a missing file defaults to.
+  [ "$(cat "$JBASH_DIR/sandbox" 2>/dev/null || echo 1)" = 0 ] && jbs=--insecure || jbs=--sandbox
   # progress (spinner + token usage) is drawn by the Rust helper itself
-  if ! out="$( "$JBASH_BIN" "$fun" --plain "$@" )"; then
+  if ! out="$( "$JBASH_BIN" "$fun" --plain "$jbs" "$@" )"; then
     return $?
   fi
   [ -z "$out" ] && return 0
@@ -211,9 +215,12 @@ ai() {
   __jbash_run ai "$@"
 }
 ask() {
+  local jbs
   if [ -n "$1" ]; then
+    # forward the session's sandbox choice, like __jbash_run does
+    [ "$(cat "$JBASH_DIR/sandbox" 2>/dev/null || echo 1)" = 0 ] && jbs=--insecure || jbs=--sandbox
     # ask prints its own answer directly; nothing to confirm or eval here.
-    "$JBASH_BIN" ask --plain "$@"
+    "$JBASH_BIN" ask --plain "$jbs" "$@"
   fi
 }
 fix() {
@@ -244,7 +251,7 @@ command_not_found_handle() {
 
 
 // Assemble the full rc file that gets dropped into the runtime directory and
-// passed to bash via --rcfile on every interactive start.   The contract with
+// passed to bash via --rcfile on every interactive start. The contract with
 // the user's own config is sacred: their ~/.bashrc is sourced verbatim first,
 // then everything jbash adds gets layered on top, so a user's aliases,
 // functions and prompts keep working exactly as before.
@@ -293,7 +300,7 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
 }
 
 // Flip the parent's own terminal into raw mode so bytes pass straight through
-// to the pty (no ISIG/ICANON preprocessing in the wrapper).   The saved
+// to the pty (no ISIG/ICANON preprocessing in the wrapper). The saved
 // termios is handed back so we can restore it when the session ends.
 fn set_raw(fd: BorrowedFd<'_>) -> io::Result<term::Termios> {
     let orig = term::tcgetattr(&fd)?;
@@ -357,7 +364,7 @@ fn raw_write(fd: i32, buf: &[u8]) -> io::Result<()> {
 }
 
 // One relay step: read whatever is waiting on `from` (an 8k chunk) and push
-// it out to `to`.   Returns true when the read hit EOF, signalling the caller
+// it out to `to`. Returns true when the read hit EOF, signalling the caller
 // to wind the loop down.
 fn relay(from: i32, to: i32) -> io::Result<bool> {
     let mut buf = [0u8; 8192];
@@ -370,7 +377,7 @@ fn relay(from: i32, to: i32) -> io::Result<bool> {
 }
 
 // Restores the parent's termios on drop, even if the parent loop bails via an
-// early return.   Catching every unwind path with a Drop is far more reliable
+// early return. Catching every unwind path with a Drop is far more reliable
 // than remembering to reset by hand.
 struct RawGuard {
     fd: i32,
@@ -417,7 +424,7 @@ fn exit_code(child: Pid) -> i32 {
     }
 }
 
-// System prompts the model sees.   These read a bit like a contract because
+// System prompts the model sees. These read a bit like a contract because
 // that is exactly what they are: the model has to follow them for the output
 // to be usable (one bare command line, no fences): small deviations get
 // cleaned up anyway, but the less cleanup needed, the fewer quirks escape.
@@ -438,14 +445,18 @@ pub const SYS_ASK: &str = "You are an AI assistant embedded inside the \"jbash\"
 pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected command line ONLY: a single line, no fences, no explanation, no backticks. If one line cannot fix it, give a short sequence separated by `; `. Prepend any required explanation as one `# ` comment line.";
 
 // The interactive session: generate the rc, fork bash onto a fresh pty, and
-// sit in the relay loop until the shell exits.   Everything else in this file
+// sit in the relay loop until the shell exits. Everything else in this file
 // exists to make this one function behave correctly.
 pub fn interactive(cfg: &Config) -> i32 {
     let dir = config::data_dir();
     let _ = fs::create_dir_all(&dir);
     // AI interception is on by default each session; `ai off` flips state.
     let _ = fs::write(dir.join("state"), "on");
-    // A fresh interactive session starts with an empty transcript.   Context
+    // Persist the sandbox choice for the session too. The rc helpers read it
+    // so every `ai`/`ask`/`fix` call the shell makes re-applies the exact
+    // --sandbox/--insecure the user launched with (default: sandboxed).
+    let _ = fs::write(dir.join("sandbox"), if cfg.sandbox { "1" } else { "0" });
+    // A fresh interactive session starts with an empty transcript. Context
     // across sessions would just confuse the model with stale topics.
     context::reset(&dir);
 
@@ -501,7 +512,7 @@ pub fn interactive(cfg: &Config) -> i32 {
 
 // Child side of the fork: detach into a new session with the pty slave as its
 // controlling terminal, wire the standard fds to the slave, and exec bash with
-// the generated rc.   The master fd is explicitly closed so bash doesn't keep
+// the generated rc. The master fd is explicitly closed so bash doesn't keep
 // a copy around that would never let the pty see EOF afterwards.
 fn child_setup(
     shell: String,
@@ -532,7 +543,7 @@ fn child_setup(
 // Parent side: put our terminal in raw mode and then poll the two fds: the
 // real terminal (user input) and the pty master (bash output): relaying in
 // both directions, mirroring the window size each pass, and watching for the
-// child to exit.   When bash dies we drain whatever output is still buffered
+// child to exit. When bash dies we drain whatever output is still buffered
 // so the user's screen isn't clipped, then return its exit code.
 fn parent_loop(master: i32, child: Pid) -> i32 {
     // SIGPIPE would otherwise kill the relay if the child vanished mid-write.
