@@ -189,7 +189,11 @@ impl Status {
                     // ASCII glyphs (digits, '#') are one column wide while the
                     // katakana are two; pad them so the line never shudders
                     // left and right from frame to frame.
-                    let g = if ch.is_ascii() { format!("{ch} ") } else { ch.to_string() };
+                    let g = if ch.is_ascii() {
+                        format!("{ch} ")
+                    } else {
+                        ch.to_string()
+                    };
                     let ext = d.lock().map(|x| x.clone()).unwrap_or_default();
                     let line = format!(
                         "\r\x1b[{}m{}\x1b[0m {} (\x1b[1m{}\x1b[0m)\x1b[2m{}\x1b[0m\x1b[K",
@@ -203,7 +207,11 @@ impl Status {
                 }
             });
         }
-        Status { tty, detail, running }
+        Status {
+            tty,
+            detail,
+            running,
+        }
     }
 
     fn detail(&self, d: &str) {
@@ -280,11 +288,7 @@ struct Streamed {
 // after the model finished, so once we have seen [DONE] the curl child is
 // killed rather than waited on, and that forced exit is not treated as an
 // error.
-fn post_stream(
-    cfg: &Config,
-    payload: &str,
-    status: &Status,
-) -> Result<Streamed, String> {
+fn post_stream(cfg: &Config, payload: &str, status: &Status) -> Result<Streamed, String> {
     let mut curl = Command::new("curl")
         .args([
             "-sS",
@@ -345,10 +349,16 @@ fn post_stream(
         };
         if let Some(u) = v.get("usage") {
             let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-            st.usage = Some((g("prompt_tokens"), g("completion_tokens"), g("total_tokens")));
+            st.usage = Some((
+                g("prompt_tokens"),
+                g("completion_tokens"),
+                g("total_tokens"),
+            ));
         }
         let choice = &v["choices"][0];
-        let Some(delta) = choice.get("delta") else { continue };
+        let Some(delta) = choice.get("delta") else {
+            continue;
+        };
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
             if !c.is_empty() {
                 st.has_content = true;
@@ -409,7 +419,13 @@ fn read_stderr_tail(curl: &mut std::process::Child) -> String {
     if e.read_to_string(&mut all).is_err() {
         return String::new();
     }
-    all.chars().rev().take(160).collect::<String>().chars().rev().collect()
+    all.chars()
+        .rev()
+        .take(160)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 // The plain, non-tool chat path (used by `fix`, and as the fallback whenever
@@ -466,7 +482,11 @@ fn build_tools_field() -> String {
 }
 
 fn msg_role(role: &str, content: &str) -> String {
-    format!(r#"{{"role":"{}","content":"{}"}}"#, role, json_escape(content))
+    format!(
+        r#"{{"role":"{}","content":"{}"}}"#,
+        role,
+        json_escape(content)
+    )
 }
 
 fn msg_tool(id: &str, content: &str) -> String {
@@ -492,7 +512,10 @@ fn msg_assistant_toolcalls(calls: &[ToolCall]) -> String {
             )
         })
         .collect();
-    format!(r#"{{"role":"assistant","content":null,"tool_calls":[{}]}}"#, parts.join(","))
+    format!(
+        r#"{{"role":"assistant","content":null,"tool_calls":[{}]}}"#,
+        parts.join(",")
+    )
 }
 
 // Split a response body into (visible answer text, list of tool calls) using a
@@ -646,11 +669,15 @@ fn run_shell(cfg: &Config, cmd: &str, timeout_secs: u64) -> String {
         // Output passes through the redaction sweep even in unsandboxed mode:
         // it is cheap, and a key that leaked once stays out of the model's
         // hands at zero extra risk.
-        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(&out.stdout)));
+        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(
+            &out.stdout,
+        )));
     }
     if !out.stderr.is_empty() {
         s.push_str("stderr:\n");
-        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(&out.stderr)));
+        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(
+            &out.stderr,
+        )));
     }
     let s: String = s.chars().take(6000).collect();
     let s = s.trim_end().to_string();
@@ -710,10 +737,7 @@ fn tty_progress(msg: &str) {
 // abort the loop early: that specific signature means the model is stuck
 // going in circles and more rounds will not help.
 pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<String, String> {
-    let mut messages = vec![
-        msg_role("system", system),
-        msg_role("user", user),
-    ];
+    let mut messages = vec![msg_role("system", system), msg_role("user", user)];
     let tool_timeout = cfg.timeout.min(30);
     let mut cumulative: u64 = 0;
     let mut seen_cmds: HashMap<String, usize> = HashMap::new();
@@ -777,8 +801,7 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
             *n += 1;
             if *n > 1 {
                 return Err(
-                    "no valid answer could be produced; the reasoning kept repeating itself"
-                        .into(),
+                    "no valid answer could be produced; the reasoning kept repeating itself".into(),
                 );
             }
         }
@@ -788,7 +811,10 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
         for c in &calls {
             let last = if c.name != TOOL_NAME {
                 // Never saw a stray tool name: tell the model, don't crash.
-                format!("[tool] unknown tool '{name}', expected {TOOL_NAME}", name = c.name)
+                format!(
+                    "[tool] unknown tool '{name}', expected {TOOL_NAME}",
+                    name = c.name
+                )
             } else {
                 // Print what is being run so the user can see the model working.
                 tty_progress(&format!("\x1b[1;35m⚙\x1b[0m {cmd}", cmd = c.command));
@@ -884,7 +910,7 @@ pub fn extract_command(raw: &str) -> String {
         })
         .map(|l| l.trim_end().to_string())
         .collect();
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
 
@@ -958,7 +984,10 @@ mod tool_tests {
             "printf '%s' $'-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----'",
             5,
         );
-        assert!(!out.contains("-----BEGIN"), "key block made it to output: {out}");
+        assert!(
+            !out.contains("-----BEGIN"),
+            "key block made it to output: {out}"
+        );
         assert!(out.contains("[REDACTED private key]"), "got: {out}");
     }
 }

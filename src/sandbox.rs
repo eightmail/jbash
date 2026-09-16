@@ -31,19 +31,8 @@ use std::path::PathBuf;
 // exported in their session is withheld.   What the command legitimately
 // needs to do its job lives here.
 const SAFE_VARS: &[&str] = &[
-    "PATH",
-    "PWD",
-    "OLDPWD",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
-    "TZ",
-    "SHLVL",
-    "_",
+    "PATH", "PWD", "OLDPWD", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "TZ", "SHLVL", "_",
     // HOME and TMPDIR are set explicitly below, not inherited.
 ];
 
@@ -52,9 +41,24 @@ const SAFE_VARS: &[&str] = &[
 // Only referenced by the test helper below, so it lives under cfg(test) too.
 #[cfg(test)]
 const SENSITIVE_MARKERS: &[&str] = &[
-    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CRED",
-    "AUTH", "SSH", "GPG", "AWS", "AZURE", "GCP", "GOOGLE", "PRIVATE", "DSN",
-    "APITOKEN", "BEARER",
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "CRED",
+    "AUTH",
+    "SSH",
+    "GPG",
+    "AWS",
+    "AZURE",
+    "GCP",
+    "GOOGLE",
+    "PRIVATE",
+    "DSN",
+    "APITOKEN",
+    "BEARER",
 ];
 
 // Where the sandbox lives: a scratch tree under the runtime directory with a

@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Lint everything in the jbash repo from one entry point.
+
+Not just Rust: this walks every file kind the project ships and runs whatever
+linter applies, exactly like the CI workflow would:
+
+    Rust    cargo fmt --check
+            cargo clippy --all-targets --all-features -- -D warnings
+            cargo test --verbose
+    Shell   shellcheck (or a `bash -n` syntax pass when shellcheck is absent)
+    Python  py_compile (plus ruff / flake8 when installed)
+    JSON    structural validation of every .json file
+    Text    trailing-whitespace and final-newline checks on source files
+
+Rust tooling is required (this is a Rust project): if cargo cannot be found,
+that section is reported as SKIP with a hint, and the run still exits clean
+for everything else.   Optional tools are SKIPped, never FAILed.
+
+Usage:
+    python3 test/pylint            run all linters
+    python3 test/pylint --rust     run only the Rust checks
+    python3 test/pylint --shell --python
+    python3 test/pylint --help
+
+Exit status is 0 only when there were no FAILs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IGNORED_DIRS = {"target", ".git"}
+IGNORED_FILES = {"matrix.bak"}
+TEXT_EXTS = {".rs", ".md", ".toml", ".sh", ".py", ".txt", ".yml", ".yaml"}
+TEXT_FILES = {
+    "install.sh",
+    "README.md",
+    "Cargo.toml",
+    "test/cases.txt",
+    "test/run_tests.py",
+    "test/pylint",
+}
+
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+
+_results: list[str] = []
+
+
+def source_files():
+    """Yield (repo-relative path, absolute path) for every tracked-ish file."""
+    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT)):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+        for fn in filenames:
+            if fn in IGNORED_FILES:
+                continue
+            abs_path = os.path.join(dirpath, fn)
+            yield os.path.relpath(abs_path, ROOT), abs_path
+
+
+def report(label: str, status: str, note: str = "") -> str:
+    color = GREEN if status == "PASS" else RED if status == "FAIL" else YELLOW
+    line = "  [{}] {}{}".format(label, status, (" - " + note) if note else "")
+    print(f"{color}{line}{RESET}")
+    _results.append(status)
+    return status
+
+
+def run(cmd: list[str]) -> bool | None:
+    """True=exit 0, False=exit non-zero, None=tool could not be spawned."""
+    try:
+        proc = subprocess.run(cmd, cwd=ROOT)
+        return proc.returncode == 0
+    except FileNotFoundError:
+        return None
+
+
+def find_cargo() -> str | None:
+    exe = shutil.which("cargo")
+    if exe:
+        return exe
+    home_bin = os.path.join(os.path.expanduser("~"), ".cargo", "bin", "cargo")
+    cargo_home_bin = os.path.join(os.environ.get("CARGO_HOME", ""), "bin", "cargo")
+    for cand in (home_bin, cargo_home_bin):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+
+# ---------------------------------------------------------------- Rust ---
+def lint_rust(cargo: str | None) -> None:
+    if cargo is None:
+        report("rust.cargo", "SKIP", "cargo not found; install via https://rustup.rs")
+        return
+    fmt = run([cargo, "fmt", "--all", "--", "--check"])
+    clippy = run([cargo, "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"])
+    tests = run([cargo, "test", "--verbose"])
+    ok = fmt is True and clippy is True and tests is True
+    detail = "fmt={} clippy={} tests={}".format(
+        "ok" if fmt is True else "FAIL" if fmt is False else "n/a",
+        "ok" if clippy is True else "FAIL" if clippy is False else "n/a",
+        "ok" if tests is True else "FAIL" if tests is False else "n/a",
+    )
+    report("rust", "PASS" if ok else "FAIL", detail)
+
+
+# ---------------------------------------------------------------- Shell ---
+def lint_shell() -> None:
+    files = [rel for rel, _ in source_files() if rel.endswith(".sh") or rel == "install.sh"]
+    if not files:
+        report("shell", "PASS", "no shell files to check")
+        return
+    sc = shutil.which("shellcheck")
+    if sc:
+        bad = [rel for rel in files if run([sc, rel]) is not True]
+        report("shell", "PASS" if not bad else "FAIL",
+               "shellcheck: {} file(s)".format(len(files)))
+        return
+    if shutil.which("bash") is None:
+        report("shell", "SKIP", "neither shellcheck nor bash available to check")
+        return
+    bad = []
+    for rel in files:
+        if run(["bash", "-n", os.path.join(ROOT, rel)]) is not True:
+            bad.append(rel)
+    report("shell", "PASS" if not bad else "FAIL",
+           "bash -n (fallback): {} file(s)".format(len(files)))
+
+
+# --------------------------------------------------------------- Python ---
+def lint_python() -> None:
+    files = [rel for rel, _ in source_files() if rel.endswith(".py")]
+    if not files:
+        report("python", "PASS", "no python files to check")
+        return
+    bad = []
+    for rel in files:
+        if run([sys.executable, "-m", "py_compile", os.path.join(ROOT, rel)]) is not True:
+            bad.append(rel)
+    extra = shutil.which("ruff") or shutil.which("flake8")
+    if extra:
+        for rel in files:
+            if run([extra, "check", os.path.join(ROOT, rel)]) is not True:
+                bad.append("{} ({})".format(rel, os.path.basename(extra)))
+    report("python", "PASS" if not bad else "FAIL",
+           "py_compile{}: {} file(s)".format(" + " + os.path.basename(extra) if extra else "", len(files)))
+
+
+# ----------------------------------------------------------------- JSON ---
+def lint_json() -> None:
+    files = [rel for rel, p in source_files() if rel.endswith(".json")]
+    if not files:
+        report("json", "PASS", "no json files to check")
+        return
+    bad = []
+    for rel in files:
+        try:
+            with open(os.path.join(ROOT, rel)) as f:
+                json.load(f)
+        except (OSError, ValueError) as e:
+            bad.append("{} ({})".format(rel, e))
+    report("json", "PASS" if not bad else "FAIL",
+           "valid structure, {} file(s)".format(len(files)))
+
+
+# ----------------------------------------------------------------- Text ---
+def lint_text() -> None:
+    bad = []
+    checked = 0
+    for rel, abs_path in source_files():
+        if not (rel in TEXT_FILES or any(rel.endswith(e) for e in TEXT_EXTS)):
+            continue
+        if rel.endswith(".json"):
+            continue  # validated by lint_json
+        checked += 1
+        try:
+            data = open(abs_path, "rb").read()
+        except OSError:
+            continue
+        if b"\r" in data:
+            bad.append("{} (CRLF line endings)".format(rel))
+        text = data.decode("utf-8", "replace")
+        if any(line != line.rstrip() for line in text.split("\n")):
+            bad.append("{} (trailing whitespace)".format(rel))
+        if text and not text.endswith("\n"):
+            bad.append("{} (missing final newline)".format(rel))
+    report("text", "PASS" if not bad else "FAIL",
+           "{} file(s) checked{}".format(checked, "; " + ", ".join(bad) if bad else ""))
+
+
+# ----------------------------------------------------------------- main ---
+def main() -> int:
+    ap = argparse.ArgumentParser(description="jbash repo-wide linter")
+    ap.add_argument("--rust", action="store_true", help="run rust fmt/clippy/test")
+    ap.add_argument("--shell", action="store_true", help="lint shell scripts")
+    ap.add_argument("--python", action="store_true", help="lint python files")
+    ap.add_argument("--json", action="store_true", help="validate json files")
+    ap.add_argument("--text", action="store_true", help="check source text hygiene")
+    args = ap.parse_args()
+
+    all_lints = not (args.rust or args.shell or args.python or args.json or args.text)
+    cargo = find_cargo()
+    print("linting {} ->".format(ROOT))
+    if all_lints or args.rust:
+        lint_rust(cargo)
+    if all_lints or args.shell:
+        lint_shell()
+    if all_lints or args.python:
+        lint_python()
+    if all_lints or args.json:
+        lint_json()
+    if all_lints or args.text:
+        lint_text()
+
+    fails = _results.count("FAIL")
+    passed = _results.count("PASS")
+    print("\n{} passed, {} failed, {} skipped".format(passed, fails, _results.count("SKIP")))
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

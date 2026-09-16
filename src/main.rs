@@ -17,14 +17,19 @@ use std::env;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, exit};
+use std::process::{exit, Command};
 
 // Most of the shell functions pass the user's sentence as plain argv, which
 // bash has already split on whitespace. Stitch it back together here,
 // trimming each piece and dropping anything empty so we do not end up with
 // double spaces in the middle of the sentence.
 fn join_args(args: &[String], skip: usize) -> String {
-    args.iter().skip(skip).map(|a| a.trim()).filter(|a| !a.is_empty()).collect::<Vec<&str>>().join(" ")
+    args.iter()
+        .skip(skip)
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ")
 }
 
 // Log one completed exchange into the session context file, keeping the same
@@ -96,7 +101,9 @@ fn cmd_fix(cfg: &config::Config, command_text: &str, status_text: &str) -> i32 {
                 .collect::<String>()
         })
         .unwrap_or_default();
-    let cwd = env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "?".into());
+    let cwd = env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "?".into());
     let user = format!(
         "The command: {command_text}\nExit status: {status_text}\nstderr from the failed run:\n{err_tail}\n(cwd: {cwd})"
     );
@@ -235,12 +242,20 @@ fn main() {
             // The --plain flag (inserted by the bash wrapper) just shifts the
             // argument slice by one; everything else is shared with the plain
             // `jbash ai "text"` invocation.
-            let skip = if args.get(1).map(|s| s == "--plain").unwrap_or(false) { 2 } else { 1 };
+            let skip = if args.get(1).map(|s| s == "--plain").unwrap_or(false) {
+                2
+            } else {
+                1
+            };
             let text = join_args(&args, skip);
             exit(cmd_ai(&cfg, &text));
         }
         "ask" => {
-            let skip = if args.get(1).map(|s| s == "--plain").unwrap_or(false) { 2 } else { 1 };
+            let skip = if args.get(1).map(|s| s == "--plain").unwrap_or(false) {
+                2
+            } else {
+                1
+            };
             let text = join_args(&args, skip);
             exit(cmd_ask(&cfg, &text));
         }
