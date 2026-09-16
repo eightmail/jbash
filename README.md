@@ -14,26 +14,26 @@ A work in progress.
 - In **activated** mode:  
   * **Host-Level Access:** Commands executed through this tool run with your user account's full permissions. While immutable operating systems like Secureblue protect core system binaries, **your home directory, personal files, environment variables, and SSH keys remain fully accessible** to any command executed by the process.
 
+*NOTE: This has only been tested on Fedora Secureblue.  
+
 ## Description
 
 Why the name jbash (JSON Bourne Again Shell)?
 - *JSON* - Because it uses JSON files to process prompts and customize shell themes.
 - *Bourne* - A wordplay on Born in Bourne Again Shell (the classic Unix shell engine that drives it).
-- 🙂 And because like the rogue super-spy, jbash packs lethal capabilities and should be handled with extreme care when "activated."
+- 🙂 And like the rogue super-spy, jbash packs lethal capabilities and should be handled with extreme care when "activated."  
 
-**jbash** integrates local LLMs (such as Qwen 2.5) with local shell command execution.
+**jbash** integrates local LLMs (such as Qwen 2.5) with local shell command execution.  
 
 **jbash** is an AI copilot shell. It is a lightweight Rust wrapper around your
 real `bash` that keeps **every native shell behavior**: readline history with
 the up-arrow, tab completion, aliases, job control, `cd` persistence: and
-layers an AI assistant on top of it.
+layers an AI assistant on top of it.  
 
 Instead of reimplementing a shell, jbash launches your actual `bash` over a
 pseudo-terminal and injects a tiny startup hook that provides three magic
 commands: `ai`, `ask`, and `fix`. Because the engine is your real shell, you
-never lose your `.bashrc`, environment, completions, or history.
-
-*NOTE: This has only been tested on Fedora Secureblue.
+never lose your `.bashrc`, environment, completions, or history.  
 
 ```
 jbash ai    write a one-liner that deletes everything except the newest file
