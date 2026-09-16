@@ -1,4 +1,4 @@
-# jbash test cases — one test per line
+# jbash test cases: one test per line
 # Lines starting with # are comments, blank lines are ignored
 # Lines starting with ! expect non-zero exit code
 # Everything else is jbash command arguments (exit 0 = pass)
@@ -8,7 +8,7 @@ ask hello
 ask ls -la
 ask what is the hostname
 
-# ask with garbage — should reach the LLM, not loop
+# ask with garbage: should reach the LLM, not loop
 ask qweqwe
 ask sdasd
 ask lslsls
@@ -26,7 +26,7 @@ ask how do I list files
 ask what is disk usage
 ask show me running processes
 
-# edge cases — should not loop or crash
+# edge cases: should not loop or crash
 ask .
 ask /nonexistent
 ask -v

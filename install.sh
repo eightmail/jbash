@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# jbash — JSON Bourne Again Shell, an AI copilot shell.
+# jbash: JSON Bourne Again Shell, an AI copilot shell.
 # Builds from source and installs to ~/.local/bin (or $JBASH_PREFIX).
 
 set -euo pipefail
@@ -62,7 +62,7 @@ if [[ ! -f "$RC" || "$DORECONFIG" = true ]]; then
     echo "jbash: backed up existing $RC to $RC.bak"
   fi
   cat > "$RC" <<'EOF'
-# jbash configuration — parameters are read from this file.
+# jbash configuration: parameters are read from this file.
 
 # AI server (OpenAI-compatible endpoint, e.g. Ollama)
 api_url=http://localhost:11434/v1

@@ -1,10 +1,26 @@
+// The JSON ecosystem: themes and prompt plugins.
+//
+// Users can drop plain JSON files into a config directory to shape the prompt
+// without touching Rust or bash.   There are two kinds of file, in two
+// folders:
+//
+//   ~/.config/jbash/themes/<name>.json   ->  prompt layouts
+//   ~/.config/jbash/plugins/<name>.json  ->  extra prompt segments
+//
+// A theme decides which of the built-in segments appear (git branch, dirty
+// state, command duration, virtualenv, exit code), whether the prompt sits on
+// a fresh line, the base colors, and which plugins join in.   A plugin is just
+// a segment whose content comes from running a shell command: e.g. the
+// current k8s context, a battery percentage, a weather glyph.   Looking the
+// files up at startup keeps the runtime fast: no repeated disk reads while
+// you are actually typing commands.
 use crate::config::Config;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A prompt layout: which built-in segments render, whether the prompt starts
-/// on a fresh line, base colors, and which plugins participate.
+// A resolved theme.   `plugins` being empty means "use everything that was
+// discovered": the more common intent than opting out one by one.
 pub struct Theme {
     pub name: String,
     pub segments: Vec<String>,
@@ -14,8 +30,11 @@ pub struct Theme {
     pub path_color: String,
 }
 
-/// An extra prompt segment contributed by a plugin: runs `command`, shows
-/// `label` + first output line in `color`, with `timeout` seconds to complete.
+// Extra prompt segment contributed by a plugin: run `command`, show `label`
+// + first output line in `color`, give it `timeout` seconds before we stop
+// waiting.   Big trade-off here: keep the commands cheap.   A slow plugin
+// command delays every single prompt draw, which is exactly what drives
+// people away from fancy shells.
 pub struct Plugin {
     pub name: String,
     pub command: String,
@@ -24,6 +43,7 @@ pub struct Plugin {
     pub timeout: u64,
 }
 
+// The segments available out of the box, in the order they render.
 fn default_segments() -> Vec<String> {
     ["git", "dirty", "dur", "venv", "err"]
         .iter()
@@ -31,6 +51,11 @@ fn default_segments() -> Vec<String> {
         .collect()
 }
 
+// The three layouts compiled in.   "modern" is the two-line starship-flavoured
+// one (segments above, command line below), "minimal" is nothing but the
+// prompt name and path.   Anything that is not "modern" or "minimal" falls
+// back to the classic one-line default, which keeps bad typos in the config
+// from leaving the user with an empty prompt.
 fn builtin_theme(name: &str) -> Theme {
     let (segments, newline): (Vec<String>, bool) = match name.to_ascii_lowercase().as_str() {
         "modern" => (default_segments(), true),
@@ -47,6 +72,9 @@ fn builtin_theme(name: &str) -> Theme {
     }
 }
 
+// Where the JSON files are looked for.   JBASH_CONFIG is the escape hatch for
+// people who keep their dotfiles in sync across machines and want the whole
+// jbash config nested under their own tree.
 fn conf_dir() -> PathBuf {
     if let Ok(d) = std::env::var("JBASH_CONFIG") {
         if !d.is_empty() {
@@ -63,6 +91,10 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
+// List the .json files in a subdirectory, sorted by name so the rendered
+// prompt is deterministic rather than dependent on readdir order.   A missing
+// directory simply yields an empty list: having no themes installed is a
+// perfectly valid state.
 fn json_files(sub: &str) -> Vec<PathBuf> {
     let dir = conf_dir().join(sub);
     let Ok(rd) = fs::read_dir(&dir) else {
@@ -83,6 +115,9 @@ fn stem(p: &Path) -> String {
         .to_string()
 }
 
+// Read one theme JSON and turn it into a Theme.   Filename acts as a fallback
+// identity for files that do not declare a `name`; defaults mirror the
+// built-in "default" layout so a sparse file still produces a sane prompt.
 fn parse_theme(p: &Path) -> Option<Theme> {
     let raw = fs::read_to_string(p).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
@@ -121,6 +156,9 @@ fn parse_theme(p: &Path) -> Option<Theme> {
     })
 }
 
+// Read one plugin JSON.   A plugin without a `command` is rejected outright —
+// there is nothing sensible to render for it, so it is better to skip it
+// silently than to show an empty label on every prompt.
 fn parse_plugin(p: &Path) -> Option<Plugin> {
     let raw = fs::read_to_string(p).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
@@ -134,8 +172,10 @@ fn parse_plugin(p: &Path) -> Option<Plugin> {
     })
 }
 
-/// Resolve the active theme (JSON theme matching `cfg.theme`, else built-in)
-/// plus all discovered plugin segments.
+// Resolve the active theme: first look for a JSON file whose name matches
+// cfg.theme (JBASH_THEME in the config), otherwise fall back to the compiled
+// layouts.   The plugin list is all discovered plugins; filtering by theme is
+// done by whoever renders the prompt.
 pub fn load(cfg: &Config) -> (Theme, Vec<Plugin>) {
     let theme = json_files("themes")
         .iter()

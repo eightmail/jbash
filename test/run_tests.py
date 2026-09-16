@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-jbash test runner — reads test/cases.txt, runs each case, reports results.
+jbash test runner: reads test/cases.txt, runs each case, reports results.
 
 Usage:
     python3 test/run_tests.py [--jbash PATH] [--cases PATH] [--timeout SECS]
@@ -87,7 +87,7 @@ def main():
     if failures:
         print("\n\033[91mFailures:\033[0m")
         for label, reason, output in failures:
-            print(f"\n  {label} — {reason}")
+            print(f"\n  {label}: {reason}")
             snippet = output.strip().split("\n")[-10:] if output.strip() else ["<no output>"]
             for line in snippet:
                 print(f"    {line}")

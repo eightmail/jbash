@@ -1,3 +1,12 @@
+// Everything that talks to the model lives in this file: building the JSON
+// request payloads, streaming the response off the wire, showing the animated
+// status line while we wait, and: the interesting part: letting the model
+// call back into the machine through a run_shell tool.
+//
+// The HTTP client is deliberately plain curl + jq (no HTTP library): both are
+// universally present on a dev box, the endpoints we target are a tiny subset
+// of the OpenAI schema, and any failure surfaces as a readable curl exit
+// status rather than a library error nobody can interpret.
 use crate::config::Config;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -8,6 +17,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+// Escape Rust strings for use inside a JSON string literal.   We are building
+// payloads by hand rather than with a serialiser, so this is the one function
+// that has to be right: a stray double-quote in the user's sentence would
+// otherwise corrupt the whole request and confuse the parser with a mystery
+// 400 from the server.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -24,6 +38,9 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+// The config accepts both "http://host:port/v1" and "http://host:port" as an
+// api_url.   Normalise so the endpoint always lands on /v1/chat/completions,
+// regardless of which spelling the user picked.
 fn api_url(cfg: &Config) -> String {
     let mut base = cfg.api_url.trim_end_matches('/').to_string();
     if base.ends_with("/v1") {
@@ -32,7 +49,9 @@ fn api_url(cfg: &Config) -> String {
     format!("{base}/v1/chat/completions")
 }
 
-/// POST a raw payload to the chat completions endpoint; returns the raw JSON body.
+// POST the raw payload (already fully escaped) to the endpoint and return the
+// raw JSON body; on failure, rebuild a readable error from the last bits of
+// stderr so we don't dump a whole /tmp log on the user.
 fn post_raw(cfg: &Config, payload: &str) -> Result<String, String> {
     let curl = Command::new("curl")
         .args([
@@ -70,7 +89,10 @@ fn post_raw(cfg: &Config, payload: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&curl.stdout).into_owned())
 }
 
-/// Run `jq -r <filter>` against `body` (fed via printf); returns jq stdout.
+// Feed `body` into `jq -r "<filter>"` and return its stdout.   printf is the
+// transport because it never mangles special characters the way a heredoc
+// might; the filter itself is responsible for pulling the field we want out
+// of the response.
 fn pipe_fetch(body: &str, filter: &str) -> Result<String, String> {
     let printf = Command::new("printf")
         .arg("%s")
@@ -108,8 +130,9 @@ fn pipe_fetch(body: &str, filter: &str) -> Result<String, String> {
 /*  Terminal status line (spinner + live token usage)                  */
 /* ------------------------------------------------------------------ */
 
-/// Glyph color for the status spinner: neon green on the default theme
-/// (matrix look), yellow elsewhere.
+// Colour for the spinner glyph.   The default theme goes neon green because
+// the katakana rain suits it; every other theme gets a calmer amber so the
+// accent colour does not clash with whatever the user designed.
 fn glyph_color(theme: &str) -> String {
     if theme.eq_ignore_ascii_case("default") {
         "92".into()
@@ -118,9 +141,13 @@ fn glyph_color(theme: &str) -> String {
     }
 }
 
-/// Animated status line written to the controlling terminal while a model
-/// request is in flight. Lives in the *requesting* process, so interrupting
-/// the command kills the spinner too (no leftover background loop).
+// The animated status line.   Two properties make it behave in the way people
+// actually want:
+//   - it is drawn straight to /dev/tty, never to stdout/stderr, so captured
+//     output and the logged stderr stay clean;
+//   - it lives in the *requesting* process.   Interrupt the command (Ctrl+C)
+//     and the whole thing disappears with it, no orphaned spinner loop is
+//     left drawing over the next prompt.
 struct Status {
     tty: Option<Arc<Mutex<std::fs::File>>>,
     detail: Arc<Mutex<String>>,
@@ -128,6 +155,11 @@ struct Status {
 }
 
 impl Status {
+    // Kick off the render thread if a controlling terminal is available (no
+    // tty, e.g. stdout piped, and the whole status line is skipped silently).
+    // The random glyph comes from a tiny xorshift PRNG seeded with the time
+    // and pid, not a cryptographic RNG: all we need is "not always the same
+    // character".
     fn start(job: &str, model: &str, glyph_color: &str) -> Status {
         let tty = std::fs::OpenOptions::new()
             .write(true)
@@ -154,6 +186,9 @@ impl Status {
                     rng ^= rng >> 7;
                     rng ^= rng << 17;
                     let ch = frames[(rng as usize) % frames.len()];
+                    // ASCII glyphs (digits, '#') are one column wide while the
+                    // katakana are two; pad them so the line never shudders
+                    // left and right from frame to frame.
                     let g = if ch.is_ascii() { format!("{ch} ") } else { ch.to_string() };
                     let ext = d.lock().map(|x| x.clone()).unwrap_or_default();
                     let line = format!(
@@ -190,7 +225,9 @@ impl Status {
     }
 }
 
-/// Partial tool call accumulated from streaming `delta.tool_calls` chunks.
+// One tool call as it arrives from the wire.   Streaming backends send
+// `delta.tool_calls[].function.arguments` in fragments, so `args` accumulates
+// across chunks for the same `index`.
 #[derive(Default, Clone)]
 struct ToolCallDelta {
     id: String,
@@ -202,8 +239,10 @@ fn tool_call_delta_index(tc: &serde_json::Value) -> usize {
     tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize
 }
 
-/// Rebuild a `{"choices":[{"message":{...}}]}` body from streamed pieces so the
-/// existing non-streaming parser can be reused.
+// After the streaming pass, reassemble everything we collected into a single
+// body shaped exactly like a non-streaming response.   That lets the existing
+// jq-based parser handle streaming and non-streaming identically, which is
+// one less code path to keep in sync.
 fn recombined_body(content: &str, calls: &[ToolCallDelta]) -> String {
     let tcs: Vec<String> = calls
         .iter()
@@ -223,6 +262,9 @@ fn recombined_body(content: &str, calls: &[ToolCallDelta]) -> String {
     )
 }
 
+// What accumulates while we read one streaming response off the wire:
+// the visible content, the partial tool calls, and (if the backend opted in)
+// the final usage numbers.
 struct Streamed {
     content: String,
     has_content: bool,
@@ -231,9 +273,13 @@ struct Streamed {
     usage: Option<(u64, u64, u64)>,
 }
 
-/// Streaming chat completion via curl: each `data:` SSE line is parsed,
-/// content is accumulated and live token usage is pushed to the status line.
-/// On HTTP failure the error body is captured for the round-0 fallback path.
+// Streaming chat completion via a raw curl -N.   Each `data:` line of the SSE
+// stream is parsed on the fly; content accumulates and the live token estimate
+// is pushed to the status line as it grows.   The one thing to be careful
+// about: an HTTP server doing keep-alive may leave the connection hanging even
+// after the model finished, so once we have seen [DONE] the curl child is
+// killed rather than waited on, and that forced exit is not treated as an
+// error.
 fn post_stream(
     cfg: &Config,
     payload: &str,
@@ -332,9 +378,10 @@ fn post_stream(
         }
     }
 
-    // We are done once [DONE] is seen (or the stream EOFs). A keep-alive HTTP
-    // server may leave the connection open, so don't block waiting on curl and
-    // don't treat the forced exit as a failure: the stream already completed.
+    // Done either when [DONE] arrived or the stream EOF'd on its own.   A
+    // keep-alive server may hold the socket open after the content, so we
+    // kill curl proactively and only treat a genuinely failed process (not a
+    // forced exit) as an error.
     let _ = curl.kill();
     let cooked = curl.wait();
     let status_ok = done_seen
@@ -365,8 +412,9 @@ fn read_stderr_tail(curl: &mut std::process::Child) -> String {
     all.chars().rev().take(160).collect::<String>().chars().rev().collect()
 }
 
-/// OpenAI-compatible chat completion via curl + jq (both required).
-/// `job` names the status line (ai/ask/fix) shown while the request runs.
+// The plain, non-tool chat path (used by `fix`, and as the fallback whenever
+// tool calling is unavailable).   `job` only names the status line so the
+// spinner can say "fix" instead of something generic.
 pub fn chat(cfg: &Config, system: &str, user: &str, job: &str) -> Result<String, String> {
     let payload = format!(
         r#"{{"model":"{}","stream":false,"temperature":{},"messages":[{{"role":"system","content":"{}"}},{{"role":"user","content":"{}"}}]}}"#,
@@ -391,9 +439,17 @@ pub fn chat(cfg: &Config, system: &str, user: &str, job: &str) -> Result<String,
 /*  Tool-use / function calling                                        */
 /* ------------------------------------------------------------------ */
 
+// The only tool the model gets.   Keeping it to a single, general-purpose
+// shell runner is what makes this whole design work: the model already knows
+// how to inspect and change a Unix system, it just needs the ability to do so
+// here. Specialised tools (read file, list dir, ...) would be redundant.
 const TOOL_NAME: &str = "run_shell";
-const TOOL_DESC: &str = "Run a shell command in the user's jbash session and return its stdout, stderr and exit code. Use it to inspect files, running processes, disk usage, command outputs, or to make small safe changes. Prefer short, reversible, read-only commands unless the task explicitly requires otherwise. The command run is safety-scanned and blocked if it looks destructive.";
+const TOOL_DESC: &str = "Run a shell command in the user's jbash session and return its stdout, stderr and exit code. Use it to inspect files, running processes, disk usage, command outputs, or to make small safe changes. Prefer short, reversible, read-only commands unless the task explicitly requires otherwise. The command runs inside a sandbox: the user's real HOME is replaced with an empty scratch directory, environment variables are scrubbed of credentials and tokens, and commands that read SSH keys, cloud credentials, git credential stores, dotenv files or other secret material are blocked (with a message explaining why). Never try to bypass the sandbox or retrieve secrets: it cannot and must not be done through this tool.";
 
+// Hard ceiling on request->tool->request cycles.   A normal answer needs one
+// round; a tricky one needs two or three.   Eight is generous enough that a
+// competent model never hits it, but tight enough that a stuck model cannot
+// chew up minutes of compute.
 const MAX_TOOL_ROUNDS: usize = 8;
 
 struct ToolCall {
@@ -421,6 +477,8 @@ fn msg_tool(id: &str, content: &str) -> String {
     )
 }
 
+// Real tool calls are assembled exactly as the OpenAI schema wants them so
+// backends that validate strictly don't reject our hand-built messages.
 fn msg_assistant_toolcalls(calls: &[ToolCall]) -> String {
     let parts: Vec<String> = calls
         .iter()
@@ -437,8 +495,17 @@ fn msg_assistant_toolcalls(calls: &[ToolCall]) -> String {
     format!(r#"{{"role":"assistant","content":null,"tool_calls":[{}]}}"#, parts.join(","))
 }
 
-/// Confirmation token: run a `jq` filter over a JSON response body and split the
-/// marker-prefixed, length-prefixed fields jq emits.
+// Split a response body into (visible answer text, list of tool calls) using a
+// single jq filter.   This is the fiddliest part of the whole file, so worth
+// explaining:
+//
+// The filter emits a small framed protocol - each value is prefixed with a
+// marker ("MD" for content, "TC" for tool call), then a unit-separator, then
+// the unicode length of the value, then another separator, then the value.
+// Lengths are measured in characters because jq's `length` on a string counts
+// code points, which matches Rust's char iteration.   RFC-style "```json{...}```"
+// envelopes in the content are detected and converted into tool calls so that
+// backends that cannot emit a real tool_call array still work.
 fn parse_response(body: &str) -> Result<(String, Vec<ToolCall>), String> {
     // Each emitted value is prefixed with a tag and a unicode-length, then the value.
     // Lengths match Rust `char` counts because jq's `length` on a string counts code points.
@@ -464,6 +531,10 @@ def stripfence: gsub("^```[a-z]*\n?"; "") | gsub("\n?```$"; "") | gsub("`"; "");
     let mut content: Option<String> = None;
     let mut calls: Vec<ToolCall> = Vec::new();
 
+    // Walk the framed stream: for each field read the marker, skip the
+    // separator, parse the length, then copy exactly that many characters.
+    // Unknown bytes are stepped over so a stray newline from jq formatting
+    // cannot derail the whole parse.
     let take_value = |chars: &[char], mut i: usize| -> (String, usize) {
         if i < chars.len() && chars[i] == '\u{1f}' {
             i += 1; // separator between fields
@@ -512,7 +583,15 @@ def stripfence: gsub("^```[a-z]*\n?"; "") | gsub("\n?```$"; "") | gsub("`"; "");
     Ok((content, calls))
 }
 
-fn run_shell(cmd: &str, timeout_secs: u64) -> String {
+// Actually execute one tool command locally.   The sandbox is applied here:
+// the environment is scrubbed (see sandbox.rs) unless the user disabled it
+// in the config, and both the command line and its output go through the
+// sensitive-content passes.   Wrapped in `timeout` so a runaway (say, a model
+// that decides to tail -f something) is cut off instead of hanging the
+// request forever, and the result is flattened into a compact "exit / stdout /
+// stderr" blob the model can read.   Length is capped: tool output exists to
+// inform the answer, not to be pasted back verbatim.
+fn run_shell(cfg: &Config, cmd: &str, timeout_secs: u64) -> String {
     let cmd = cmd.trim();
     if cmd.is_empty() {
         return "[tool] empty command".into();
@@ -522,7 +601,27 @@ fn run_shell(cmd: &str, timeout_secs: u64) -> String {
             "[safety guard] command blocked: {why}. Tell the user to run this manually, or suggest a safe equivalent that does not modify the system destructively."
         );
     }
-    let out = Command::new("timeout")
+    if cfg.sandbox {
+        if let Some(why) = crate::sandbox::veto(cmd) {
+            return format!(
+                "[sandbox] command blocked: it reads {why}, which is private. Rephrase to avoid touching that; the user can handle it manually."
+            );
+        }
+    }
+
+    let mut c = Command::new("timeout");
+    if cfg.sandbox {
+        // Hand the command a vacuum-cleaned environment (allowlist + redirected
+        // HOME/TMPDIR) instead of inheriting the user's session.   The clear is
+        // the important part: layering over the inherited env would only
+        // override names, leaving everything else: SSH agent, tokens: intact.
+        c.env_clear();
+        let dir = crate::config::data_dir();
+        for (k, v) in crate::sandbox::sanitized_env(&dir) {
+            c.env(k, v);
+        }
+    }
+    let out = c
         .arg(timeout_secs.to_string())
         .arg("bash")
         .arg("-c")
@@ -544,11 +643,14 @@ fn run_shell(cmd: &str, timeout_secs: u64) -> String {
     s.push('\n');
     if !out.stdout.is_empty() {
         s.push_str("stdout:\n");
-        s.push_str(&String::from_utf8_lossy(&out.stdout));
+        // Output passes through the redaction sweep even in unsandboxed mode:
+        // it is cheap, and a key that leaked once stays out of the model's
+        // hands at zero extra risk.
+        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(&out.stdout)));
     }
     if !out.stderr.is_empty() {
         s.push_str("stderr:\n");
-        s.push_str(&String::from_utf8_lossy(&out.stderr));
+        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(&out.stderr)));
     }
     let s: String = s.chars().take(6000).collect();
     let s = s.trim_end().to_string();
@@ -559,7 +661,11 @@ fn run_shell(cmd: &str, timeout_secs: u64) -> String {
     }
 }
 
-/// Passive destructive-command scanner (mirrors the interactive gag).
+// Passive destructive-command scanner, the same gag the interactive
+// command_not_found path uses.   It is deliberately a small, auditable list
+// of clearly bad things rather than a "comprehensive" (and ultimately
+// bypassable) sandbox: its job is to stop the model blasting the box, not to
+// be a security boundary.
 fn dangerous(cmd: &str) -> Option<&'static str> {
     let c = cmd.to_ascii_lowercase();
     if c.contains("rm -rf /")
@@ -584,17 +690,25 @@ fn dangerous(cmd: &str) -> Option<&'static str> {
     }
 }
 
+// A one-off progress line printed to the terminal (used for tool activity
+// between rounds).   Written to /dev/tty like the spinner so that stdout stays
+// parseable for scripted use.
 fn tty_progress(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
         let _ = writeln!(f, "{msg}");
     }
 }
 
-/// Tool-use chat loop: the model may call `run_shell`; each call is executed
-/// locally and its output is fed back as a `tool` message until the model
-/// answers. Requests are streamed so live token usage is shown on the status
-/// line. Falls back to a plain (non-tool) request if the backend rejects
-/// tool calling. `job` names the status line (ai/ask/fix).
+// The tool-using chat loop.   Flow:
+//   1. send the conversation (+ tools) streaming
+//   2. if the reply contains tool calls, run each one and push the results
+//      back as `role:"tool"` messages, then loop
+//   3. once the model answers with plain text, that is the answer.
+// Streaming keeps the spinner's token count live the whole time.   Two
+// graceful fallbacks matter: a backend that rejects tools or streaming drops
+// to the plain chat path (round 0 only), and repeated identical tool commands
+// abort the loop early: that specific signature means the model is stuck
+// going in circles and more rounds will not help.
 pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<String, String> {
     let mut messages = vec![
         msg_role("system", system),
@@ -617,8 +731,9 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
         let streamed = match post_stream(cfg, &payload, &status) {
             Ok(s) => s,
             Err(_) if round == 0 => {
-                // Backend without streaming/tool support (or a transient
-                // failure): degrade to the plain text path with the same prompt.
+                // Backend has no streaming/tool support (or it kicked off with
+                // a transient failure): degrade to the plain text path using
+                // the exact same system and user prompts.
                 status.stop();
                 return chat(cfg, system, user, job);
             }
@@ -630,7 +745,7 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
         if let Some((_, _, total)) = streamed.usage {
             cumulative += total;
             status.detail(&format!("· {} tok", cumulative));
-            // let the final count be visible for a beat before the answer
+            // hold the final count on screen for a beat so it is readable
             thread::sleep(Duration::from_millis(160));
         } else if streamed.has_content {
             status.detail(&format!("· ~{} tok…", streamed.round_tokens));
@@ -644,6 +759,7 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
             Err(e) => return Err(e),
         };
 
+        // Plain-text answer: the model is done, hand back the reply.
         if calls.is_empty() {
             let text = unwrap_final(&content);
             if text.is_empty() || text.eq_ignore_ascii_case("null") {
@@ -652,6 +768,9 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
             return Ok(text);
         }
 
+        // The model wants to run things.   Guard against the looping failure
+        // mode first: the same command proposed twice in one request means the
+        // model has no idea what to do and is repeating itself.
         let cmds: Vec<String> = calls.iter().map(|c| c.command.clone()).collect();
         for cmd in &cmds {
             let n = seen_cmds.entry(cmd.clone()).or_insert(0);
@@ -668,10 +787,12 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
 
         for c in &calls {
             let last = if c.name != TOOL_NAME {
+                // Never saw a stray tool name: tell the model, don't crash.
                 format!("[tool] unknown tool '{name}', expected {TOOL_NAME}", name = c.name)
             } else {
+                // Print what is being run so the user can see the model working.
                 tty_progress(&format!("\x1b[1;35m⚙\x1b[0m {cmd}", cmd = c.command));
-                let got = run_shell(&c.command, tool_timeout);
+                let got = run_shell(cfg, &c.command, tool_timeout);
                 if let Some(t) = truncate_for_feed(&got, 90) {
                     tty_progress(&format!("\x1b[2m  → {t}\x1b[0m"));
                 }
@@ -681,9 +802,13 @@ pub fn chat_tools(cfg: &Config, system: &str, user: &str, job: &str) -> Result<S
         }
     }
 
+    // Only reached when every round produced tool calls and never an answer.
     Err("no valid answer could be produced after several attempts".into())
 }
 
+// Trim tool output down to its first non-empty line for the one-line progress
+// echo on the terminal; building logs get summarised to something readable
+// instead of scrolling the user's screen.
 fn truncate_for_feed(s: &str, n: usize) -> Option<String> {
     let first = s.lines().map(str::trim).find(|l| !l.is_empty())?;
     let mut out: String = first.chars().take(n).collect();
@@ -693,9 +818,11 @@ fn truncate_for_feed(s: &str, n: usize) -> Option<String> {
     Some(out)
 }
 
-/// If the final reply is a JSON tool-call envelope (some backends emit the final
-/// answer as `json { "command": ... }` instead of plain text), unwrap it to the
-/// bare command/answer.
+// Some backends frame the final answer as a JSON tool-call envelope
+// (`json { "command": "..." }`, with or without fences) instead of emitting a
+// plain command line.   Detect those and pull the inner string out so the
+// caller sees a bare command; if nothing matches, the text is returned
+// unchanged.
 fn unwrap_final(raw: &str) -> String {
     let text = raw.trim().to_string();
 
@@ -730,7 +857,11 @@ fn unwrap_final(raw: &str) -> String {
     text.trim().to_string()
 }
 
-/// Reduce a model reply to a single, runnable command line.
+// Turn a model reply into a single, runnable command line.   The models we
+// target love wrapping commands in code fences and shell-syntax markers, so
+// this is mostly fence-stripping plus dropping blank lines and the stray
+// backticks that always survive.   Multi-step replies are kept as multiple
+// lines (#!/bin/sh-style) since they are meant to run as-is.
 pub fn extract_command(raw: &str) -> String {
     let cleaned = if raw.contains("```") {
         let start = raw.find("```").map(|i| i + 3).unwrap_or(0);
@@ -766,7 +897,68 @@ pub fn extract_command(raw: &str) -> String {
     joined.replace('`', "").trim().to_string()
 }
 
-/// Unescaped multi-line reply for `ask`.
+// The ask path wants prose back, not a command line, so the only cleanup is
+// stripping code fences the model tends to add around multi-line answers.
 pub fn clean_answer(raw: &str) -> String {
     raw.replace("```", "").trim().to_string()
+}
+
+#[cfg(test)]
+mod tool_tests {
+    // Real end-to-end checks on the execution path, no model involved: run
+    // commands through run_shell exactly as chat_tools would, and assert the
+    // sandbox actually holds.   JBASH_DIR is pointed at a throwaway dir so the
+    // scratch home lands somewhere harmless during the tests.
+    use super::*;
+    use crate::config::Config;
+
+    fn test_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("jbash-llm-test-{}", std::process::id()))
+    }
+
+    fn prep() {
+        std::env::set_var("JBASH_DIR", test_dir());
+    }
+
+    #[test]
+    fn vetos_private_key_reads() {
+        prep();
+        let cfg = Config::default();
+        let out = run_shell(&cfg, "cat ~/.ssh/id_rsa", 5);
+        assert!(out.contains("[sandbox] command blocked"), "got: {out}");
+    }
+
+    #[test]
+    fn sandbox_points_home_at_scratch_dir() {
+        prep();
+        let cfg = Config::default();
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        let out = run_shell(&cfg, "printf '%s' \"$HOME\"", 5);
+        assert!(out.contains("sandbox"), "HOME was not scrubbed: {out}");
+        assert!(!out.contains(&real_home), "real HOME leaked: {out}");
+    }
+
+    #[test]
+    fn sandbox_strips_ssh_agent_env() {
+        prep();
+        // Set a fake live agent socket into the parent env; the sandboxed
+        // command must not see it.
+        std::env::set_var("SSH_AUTH_SOCK", "/fake/agent.sock");
+        let cfg = Config::default();
+        let out = run_shell(&cfg, "printf '%s' \"${SSH_AUTH_SOCK:-unset}\"", 5);
+        assert!(out.contains("unset"), "SSH_AUTH_SOCK leaked: {out}");
+    }
+
+    #[test]
+    fn redacts_key_material_in_output() {
+        prep();
+        let cfg = Config::default();
+        let out = run_shell(
+            &cfg,
+            "printf '%s' $'-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----'",
+            5,
+        );
+        assert!(!out.contains("-----BEGIN"), "key block made it to output: {out}");
+        assert!(out.contains("[REDACTED private key]"), "got: {out}");
+    }
 }

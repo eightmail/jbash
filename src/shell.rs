@@ -1,3 +1,12 @@
+// The shell half of jbash.
+//
+// This is where the "it's just bash underneath" promise is actually kept.
+// We allocate a pty, fork a real `bash` onto its slave side with a generated
+// rc file, and then play phone operator: every byte the user types goes to
+// bash, every byte bash produces comes back, and the terminal window size is
+// mirrored so full-screen programs still work.   The rc file it injects is
+// where the product actually lives: the themed prompt, the ai/ask/fix
+// wrappers, the error capture, the command_not_found interception.
 use crate::config::{self, Config};
 use crate::context;
 use crate::ecosystem::{self, Plugin, Theme};
@@ -14,6 +23,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// jbash exists to wrap bash, full stop.   The config may still carry a legacy
+// "shell=" key, but we never honour it: reimplementing another engine is
+// exactly what this project refuses to do.
 pub fn resolve_shell(_cfg: &Config) -> String {
     "bash".into()
 }
@@ -22,6 +34,9 @@ fn rc_file_name() -> &'static str {
     "bashrc"
 }
 
+// Quote for single-quoted shell context (used when embedding values into the
+// generated rc).   The `'\''` dance is the standard way to close the quote,
+// emit a literal quote, and reopen: ugly but bulletproof.
 fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -47,7 +62,8 @@ __jbash_seg_dirty() {
   printf -v "$1" '%s\[\e[33m\][%s]\[\e[0m\] ' "${!1}" "$d"
 }
 
-# Execution time of the last command
+# Execution time of the last command, from a DEBUG-trap timestamp.   Uses
+# $EPOCHREALTIME (a bash builtin) so it does not fork a `date` per prompt.
 __jbash_seg_dur() {
   local s="${__jbash__start:-}" d
   [ -n "$s" ] || return 0
@@ -59,7 +75,7 @@ __jbash_seg_dur() {
   fi
 }
 
-# Active virtualenv / conda environment
+# Active python virtualenv / conda environment
 __jbash_seg_venv() {
   local vn=""
   [ -n "${VIRTUAL_ENV:-}" ] && vn="$(basename "$VIRTUAL_ENV")"
@@ -68,14 +84,17 @@ __jbash_seg_venv() {
   printf -v "$1" '%s\[\e[32m\]🐍 %s\[\e[0m\] ' "${!1}" "$vn"
 }
 
-# Non-zero exit code of the last command
+# Non-zero exit code of the last command (shown red, only when != 0)
 __jbash_seg_err() {
   [ "${2:-0}" = 0 ] && return 0
   printf -v "$1" '%s\[\e[31m\]✘ %s\[\e[0m\] ' "${!1}" "$2"
 }
 
-# JSON-contributed plugin segment
-# usage: __jbash_seg_plugin <timeout> <label> <color> <command> <outvar>
+# JSON-contributed plugin segment.
+# Signature: __jbash_seg_plugin <timeout> <label> <color> <command> <outvar>
+# Runs the plugin command through `timeout` so a slow plugin can never stall
+# the prompt render, keeps only its first output line, and appends it when
+# non-empty (plugins that produce nothing simply vanish).
 __jbash_seg_plugin() {
   [ "$#" -ge 4 ] || return 0
   local tmo="$1" label="$2" color="$3" cmd="$4" out
@@ -97,11 +116,18 @@ if [ -n "$PROMPT_COMMAND" ]; then PROMPT_COMMAND="__jbash_precmd; $PROMPT_COMMAN
 trap '__jbash__start=${__jbash__start:-$EPOCHREALTIME}' DEBUG
 "#;
 
+// Smaller alias used by prompt_script below; kept separate from the public
+// single_quote only because it was already here before the module grew.
 fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Render the `__jbash_prompt` function from an active theme + plugin segments.
+// Generate the __jbash_prompt body for the active theme.   Each configured
+// segment becomes one `__jbash_seg_*` call folded into a local `info`
+// variable; plugin segments are appended the same way (they are just segments
+// with a different provider).   The theme's colours colour the prompt name
+// and the working directory, and a `newline` theme puts a blank line before
+// the prompt itself, starship-style.
 fn prompt_script(theme: &Theme, plugins: &[Plugin]) -> String {
     let mut segs: Vec<String> = theme
         .segments
@@ -117,6 +143,8 @@ fn prompt_script(theme: &Theme, plugins: &[Plugin]) -> String {
         .filter(|s| !s.is_empty())
         .collect();
 
+    // A theme with an explicit plugin list picks just those; an empty list
+    // means "attach everything found", which is the lower-friction default.
     let picked: Vec<&Plugin> = if theme.plugins.is_empty() {
         plugins.iter().collect()
     } else {
@@ -152,6 +180,9 @@ __jbash_prompt() {{
     )
 }
 
+// The bash functions the user actually interacts with at the prompt: the
+// ai/ask/fix wrappers, the confirm-before-run logic in __jbash_run, and the
+// command_not_found interception that turns a weird sentence into a menu.
 const HELPERS_BASH: &str = r#"
 __jbash_run() {
   local fun="$1"; shift
@@ -165,7 +196,7 @@ __jbash_run() {
   if [[ "$out" == 'ai:'* ]]; then printf '\e[33mAI:\e[0m %s\n' "${out#ai: }"; return 0; fi
   printf '  \e[32m\u25b8\e[0m %s\n' "$out"
   if printf '%s\n' "$out" | grep -Eqi 'rm[ ][-a-z]*r|rm[ ][-a-z]*f|dd[ ].*of=/dev/|mkfs\.|shutdown|reboot'; then
-    printf '\e[33m  !! looks destructive — double-check.\e[0m\n'
+    printf '\e[33m  !! looks destructive: double-check.\e[0m\n'
   fi
   if [ "$JBASH_CONFIRM" = 1 ]; then printf '  run? [y/N] '; IFS= read -r yn; else yn=y; fi
   case "$yn" in y|Y|yes) eval -- "$out"; return $? ;; esac
@@ -181,22 +212,26 @@ ai() {
 }
 ask() {
   if [ -n "$1" ]; then
-    # progress (spinner + token usage) is drawn by the Rust helper itself
+    # ask prints its own answer directly; nothing to confirm or eval here.
     "$JBASH_BIN" ask --plain "$@"
   fi
 }
 fix() {
   local s cmd
   s="$(cat "$JBASH_DIR/last-status" 2>/dev/null || echo 250)"
-  [ "$s" = 0 ] && { printf '\e[2mNothing to fix — last command succeeded.\e[0m\n'; return 0; }
+  [ "$s" = 0 ] && { printf '\e[2mNothing to fix: last command succeeded.\e[0m\n'; return 0; }
   cmd="$(fc -ln -1 2>/dev/null | tail -n1)"
   __jbash_run fix "$cmd" "$s"
 }
+# A knocked-out word that bash cannot resolve becomes a menu instead of an
+# error: ask the AI about it, run whatever binary it turned out to be (already
+# failing, worth trying once more), or just skip.   Blank Enter defaults to
+# skip so mashing Enter is never destructive.
 command_not_found_handle() {
   local w="$1" op
   [ -n "${__jbash_cnf:-}" ] && return 127
   [ "$(cat "$JBASH_DIR/state" 2>/dev/null || echo on)" = off ] && return 127
-  printf '( %s is not a command — [1] ask   [2] run anyway   [3] SKIP ) ' "$w"
+  printf '( %s is not a command: [1] ask   [2] run anyway   [3] SKIP ) ' "$w"
   IFS= read -r op
   case "$op" in
     1) ask "$*" ;;
@@ -208,12 +243,19 @@ command_not_found_handle() {
 "#;
 
 
-/// Write the injected rc (prompt, ai/ask/fix, error capture) into JBASH_DIR.
+// Assemble the full rc file that gets dropped into the runtime directory and
+// passed to bash via --rcfile on every interactive start.   The contract with
+// the user's own config is sacred: their ~/.bashrc is sourced verbatim first,
+// then everything jbash adds gets layered on top, so a user's aliases,
+// functions and prompts keep working exactly as before.
 pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
     let bin = env::current_exe()
         .unwrap_or_else(|_| PathBuf::from("jbash"))
         .to_string_lossy()
         .to_string();
+    // Everything we interpolate into the rc is single-quoted, because the
+    // values (binary path, dir, theme) may legitimately contain spaces or
+    // odd characters when HOME is somewhere unusual.
     let jbash_dir = single_quote(&dir.to_string_lossy());
     let binq = single_quote(&bin);
     let nameq = single_quote(&cfg.prompt_name);
@@ -222,7 +264,7 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
     let confirm = if cfg.confirm { "1" } else { "0" };
 
     let body = format!(
-        "# jbash runtime — generated by jbash.\n\
+        "# jbash runtime: regenerated on every launch, do not edit.\n\
          JBASH_DIR={jbash_dir}\n\
          JBASH_BIN={binq}\n\
          JBASH_NAME={nameq}\n\
@@ -233,6 +275,7 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
          case $- in *i*) ;; *) return ;; esac\n\n\
          mkdir -p \"$JBASH_DIR\" 2>/dev/null\n\
          : > \"$JBASH_DIR/last-err.log\" 2>/dev/null\n\
+         # Tee stderr into last-err.log so `fix` can show the failing tail.\n\
          exec 2> >(tee -a \"$JBASH_DIR/last-err.log\" >&2)\n\n\
          {prompt}\n\
          {helpers}\n",
@@ -249,10 +292,16 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+// Flip the parent's own terminal into raw mode so bytes pass straight through
+// to the pty (no ISIG/ICANON preprocessing in the wrapper).   The saved
+// termios is handed back so we can restore it when the session ends.
 fn set_raw(fd: BorrowedFd<'_>) -> io::Result<term::Termios> {
     let orig = term::tcgetattr(&fd)?;
     let mut raw = orig.clone();
     term::cfmakeraw(&mut raw);
+    // Raw mode would normally disable output post-processing entirely, which
+    // breaks line endings on the pty master in a couple of terminal emulators;
+    // force OPOST+ONLCR back on so \n still becomes \r\n.
     raw.output_flags |= term::OutputFlags::OPOST | term::OutputFlags::ONLCR;
     term::tcsetattr(&fd, term::SetArg::TCSANOW, &raw)?;
     Ok(orig)
@@ -264,6 +313,8 @@ unsafe fn term_winsize(fd: i32) -> libc::winsize {
     ws
 }
 
+// Copy the controlling terminal's current size onto the pty master so the
+// child bash (and anything it runs, like vim) resizes with the window.
 unsafe fn sync_winsize(master: i32, src: i32) {
     let ws = term_winsize(src);
     let _ = libc::ioctl(master, libc::TIOCSWINSZ, &ws);
@@ -273,6 +324,8 @@ fn raw_read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n < 0 {
         let e = io::Error::last_os_error();
+        // EIO means the pty master saw the slave side close: treat it as EOF
+        // rather than an error so the parent doesn't die mid-teardown.
         if e.raw_os_error() == Some(libc::EIO) {
             return Ok(0);
         }
@@ -303,6 +356,9 @@ fn raw_write(fd: i32, buf: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+// One relay step: read whatever is waiting on `from` (an 8k chunk) and push
+// it out to `to`.   Returns true when the read hit EOF, signalling the caller
+// to wind the loop down.
 fn relay(from: i32, to: i32) -> io::Result<bool> {
     let mut buf = [0u8; 8192];
     let n = raw_read(from, &mut buf)?;
@@ -313,6 +369,9 @@ fn relay(from: i32, to: i32) -> io::Result<bool> {
     Ok(false)
 }
 
+// Restores the parent's termios on drop, even if the parent loop bails via an
+// early return.   Catching every unwind path with a Drop is far more reliable
+// than remembering to reset by hand.
 struct RawGuard {
     fd: i32,
     saved: Option<term::Termios>,
@@ -335,6 +394,8 @@ impl Drop for RawGuard {
     }
 }
 
+// Peek (WNOWAIT) whether the child has exited without reaping it; the actual
+// waitpid happens later so we can still read the exit code.
 fn child_done(child: Pid) -> bool {
     match waitid(
         Id::Pid(child),
@@ -346,6 +407,8 @@ fn child_done(child: Pid) -> bool {
     }
 }
 
+// Reap the child and translate its status into a normal exit code (a signal
+// exit becomes 128+signal, matching shell convention).
 fn exit_code(child: Pid) -> i32 {
     match waitpid(child, None) {
         Ok(WaitStatus::Exited(_, code)) => code,
@@ -354,9 +417,13 @@ fn exit_code(child: Pid) -> i32 {
     }
 }
 
+// System prompts the model sees.   These read a bit like a contract because
+// that is exactly what they are: the model has to follow them for the output
+// to be usable (one bare command line, no fences): small deviations get
+// cleaned up anyway, but the less cleanup needed, the fewer quirks escape.
 pub const SYS_CMD: &str = "You are an expert Unix shell engineer embedded inside \"jbash\", an interactive drop-in replacement for bash.
 
-You have a run_shell tool that executes commands in the user's session and returns their stdout, stderr and exit code. Whenever the request depends on the real state of the filesystem, processes, or command outputs — inspect FIRST with one or more short read-only run_shell calls (e.g. ls, pwd, cat, which, wc), using the results, then answer. Do not guess or fabricate state you can observe.
+You have a run_shell tool that executes commands in the user's session and returns their stdout, stderr and exit code. Whenever the request depends on the real state of the filesystem, processes, or command outputs: inspect FIRST with one or more short read-only run_shell calls (e.g. ls, pwd, cat, which, wc), using the results, then answer. Do not guess or fabricate state you can observe.
 
 Rules:
 - The run_shell tool is ONLY for your own investigation. Any command it returns that the safety guard blocks must not be retried; suggest a safe equivalent instead.
@@ -366,15 +433,20 @@ Rules:
 - Use modern GNU flags, correct quoting, and paths relative to the current working directory when sensible.
 - If the request genuinely cannot be expressed as one command line, reply with a single `# ` comment explaining why.";
 
-pub const SYS_ASK: &str = "You are an AI assistant embedded inside the \"jbash\" command-line shell. Answer tersely and directly, like a senior sysadmin, genuinely engaging with whatever the user wrote. You have a run_shell tool that can run commands in the user's session; use it to check real state (files, processes, outputs) only when that improves your answer. If the user's message is a command name that does not exist or gibberish, reply naturally — tell them it is not a command on this system and, when you can, guess what they may have meant or ask a brief clarifying question. Never pretend to run it, never simulate output, and never just echo bare placeholder text. If shell commands are relevant, show them inline as single-line examples, plain text without JSON or run_shell wrappers.";
+pub const SYS_ASK: &str = "You are an AI assistant embedded inside the \"jbash\" command-line shell. Answer tersely and directly, like a senior sysadmin, genuinely engaging with whatever the user wrote. You have a run_shell tool that can run commands in the user's session; use it to check real state (files, processes, outputs) only when that improves your answer. If the user's message is a command name that does not exist or gibberish, reply naturally: tell them it is not a command on this system and, when you can, guess what they may have meant or ask a brief clarifying question. Never pretend to run it, never simulate output, and never just echo bare placeholder text. If shell commands are relevant, show them inline as single-line examples, plain text without JSON or run_shell wrappers.";
 
-pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected command line ONLY — a single line, no fences, no explanation, no backticks. If one line cannot fix it, give a short sequence separated by `; `. Prepend any required explanation as one `# ` comment line.";
+pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected command line ONLY: a single line, no fences, no explanation, no backticks. If one line cannot fix it, give a short sequence separated by `; `. Prepend any required explanation as one `# ` comment line.";
 
-/// Spawn bash over a pty and relay bytes until it exits.
+// The interactive session: generate the rc, fork bash onto a fresh pty, and
+// sit in the relay loop until the shell exits.   Everything else in this file
+// exists to make this one function behave correctly.
 pub fn interactive(cfg: &Config) -> i32 {
     let dir = config::data_dir();
     let _ = fs::create_dir_all(&dir);
+    // AI interception is on by default each session; `ai off` flips state.
     let _ = fs::write(dir.join("state"), "on");
+    // A fresh interactive session starts with an empty transcript.   Context
+    // across sessions would just confuse the model with stale topics.
     context::reset(&dir);
 
     let rc_path = match write_rc(cfg, &dir) {
@@ -387,6 +459,8 @@ pub fn interactive(cfg: &Config) -> i32 {
 
     let shell = resolve_shell(cfg);
 
+    // Start the pty at the size of the current terminal, so the very first
+    // prompt already has the right geometry rather than some 0x0 default.
     let ws = unsafe { term_winsize(0) };
     let opts = openpty(
         Some(&Winsize {
@@ -425,6 +499,10 @@ pub fn interactive(cfg: &Config) -> i32 {
     }
 }
 
+// Child side of the fork: detach into a new session with the pty slave as its
+// controlling terminal, wire the standard fds to the slave, and exec bash with
+// the generated rc.   The master fd is explicitly closed so bash doesn't keep
+// a copy around that would never let the pty see EOF afterwards.
 fn child_setup(
     shell: String,
     master: i32,
@@ -451,7 +529,13 @@ fn child_setup(
     let _ = writeln!(io::stderr(), "jbash: exec {shell} failed: {err}");
 }
 
+// Parent side: put our terminal in raw mode and then poll the two fds: the
+// real terminal (user input) and the pty master (bash output): relaying in
+// both directions, mirroring the window size each pass, and watching for the
+// child to exit.   When bash dies we drain whatever output is still buffered
+// so the user's screen isn't clipped, then return its exit code.
 fn parent_loop(master: i32, child: Pid) -> i32 {
+    // SIGPIPE would otherwise kill the relay if the child vanished mid-write.
     let _guard = RawGuard::enable(0);
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
 
