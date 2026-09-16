@@ -471,7 +471,7 @@ pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected comm
 pub fn interactive(cfg: &Config) -> i32 {
     let dir = config::data_dir();
     let _ = fs::create_dir_all(&dir);
-    // AI interception is on by default each session; `ai off` flips state.
+// AI interception is on by default each session; `ai off` flips state.
     let _ = fs::write(dir.join("state"), "on");
     // Persist the sandbox choice for the session too.   The rc helpers read it
     // so every `ai`/`ask`/`fix` call the shell makes re-applies exactly the
