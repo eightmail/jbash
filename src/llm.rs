@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-// Escape Rust strings for use inside a JSON string literal.   We are building
+// Escape Rust strings for use inside a JSON string literal. We are building
 // payloads by hand rather than with a serialiser, so this is the one function
 // that has to be right: a stray double-quote in the user's sentence would
 // otherwise corrupt the whole request and confuse the parser with a mystery
@@ -39,7 +39,7 @@ fn json_escape(s: &str) -> String {
 }
 
 // The config accepts both "http://host:port/v1" and "http://host:port" as an
-// api_url.   Normalise so the endpoint always lands on /v1/chat/completions,
+// api_url. Normalise so the endpoint always lands on /v1/chat/completions,
 // regardless of which spelling the user picked.
 fn api_url(cfg: &Config) -> String {
     let mut base = cfg.api_url.trim_end_matches('/').to_string();
@@ -89,7 +89,7 @@ fn post_raw(cfg: &Config, payload: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&curl.stdout).into_owned())
 }
 
-// Feed `body` into `jq -r "<filter>"` and return its stdout.   printf is the
+// Feed `body` into `jq -r "<filter>"` and return its stdout. printf is the
 // transport because it never mangles special characters the way a heredoc
 // might; the filter itself is responsible for pulling the field we want out
 // of the response.
@@ -130,7 +130,7 @@ fn pipe_fetch(body: &str, filter: &str) -> Result<String, String> {
 /*  Terminal status line (spinner + live token usage)                  */
 /* ------------------------------------------------------------------ */
 
-// Colour for the spinner glyph.   The default theme goes neon green because
+// Colour for the spinner glyph. The default theme goes neon green because
 // the katakana rain suits it; every other theme gets a calmer amber so the
 // accent colour does not clash with whatever the user designed.
 fn glyph_color(theme: &str) -> String {
@@ -141,11 +141,11 @@ fn glyph_color(theme: &str) -> String {
     }
 }
 
-// The animated status line.   Two properties make it behave in the way people
+// The animated status line. Two properties make it behave in the way people
 // actually want:
 //   - it is drawn straight to /dev/tty, never to stdout/stderr, so captured
 //     output and the logged stderr stay clean;
-//   - it lives in the *requesting* process.   Interrupt the command (Ctrl+C)
+//   - it lives in the *requesting* process. Interrupt the command (Ctrl+C)
 //     and the whole thing disappears with it, no orphaned spinner loop is
 //     left drawing over the next prompt.
 struct Status {
@@ -175,7 +175,7 @@ impl Status {
             let model = model.to_string();
             let glyph = glyph_color.to_string();
             thread::spawn(move || {
-                let frames = ['ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'サ', 'シ', 'ス', 'セ', 'ソ', 'タ', 'チ', 'ツ', 'テ', 'ト', 'ナ', 'ニ', 'ヌ', 'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', 'ホ', 'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ', 'ユ', 'ヨ', 'ラ', 'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン', 'ァ', 'ィ', 'ゥ', 'ェ', 'ォ', 'ッ', 'ャ', 'ュ', 'ョ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '#'];
+                let frames = ['⚡', '⠹', '┼', 'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'サ', 'シ', 'ス', 'セ', 'ソ', 'タ', 'チ', 'ツ', 'テ', 'ト', 'ナ', 'ニ', 'ヌ', 'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', 'ホ', 'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ', 'ユ', 'ヨ', 'ラ', 'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン', 'ァ', 'ィ', 'ゥ', 'ェ', 'ォ', 'ッ', 'ャ', 'ュ', 'ョ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '#'];
                 let mut rng = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos() as u64)
@@ -444,7 +444,7 @@ pub fn chat(cfg: &Config, system: &str, user: &str, job: &str) -> Result<String,
 // how to inspect and change a Unix system, it just needs the ability to do so
 // here. Specialised tools (read file, list dir, ...) would be redundant.
 const TOOL_NAME: &str = "run_shell";
-const TOOL_DESC: &str = "Run a shell command in the user's jbash session and return its stdout, stderr and exit code. Use it to inspect files, running processes, disk usage, command outputs, or to make small safe changes. Prefer short, reversible, read-only commands unless the task explicitly requires otherwise. The command runs inside a sandbox: the user's real HOME is replaced with an empty scratch directory, environment variables are scrubbed of credentials and tokens, and commands that read SSH keys, cloud credentials, git credential stores, dotenv files or other secret material are blocked (with a message explaining why). Never try to bypass the sandbox or retrieve secrets: it cannot and must not be done through this tool.";
+const TOOL_DESC: &str = "Run a shell command in the user's jbash session and return its stdout, stderr and exit code. Use it to inspect files, running processes, disk usage, command outputs, or to make small safe changes. Prefer short, reversible, read-only commands unless the task explicitly requires otherwise. Unless jbash was started with --activated, the command runs inside a sandbox: the user's real HOME is replaced with an empty scratch directory, environment variables are scrubbed of credentials and tokens, and commands that read SSH keys, cloud credentials, git credential stores, dotenv files or other secret material are blocked (with a message explaining why). Never try to bypass the sandbox or retrieve secrets: it cannot and must not be done through this tool.";
 
 // Hard ceiling on request->tool->request cycles.   A normal answer needs one
 // round; a tricky one needs two or three.   Eight is generous enough that a
