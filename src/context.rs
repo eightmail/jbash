@@ -8,32 +8,39 @@
 // the model can follow along with what was being worked on.
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn context_file(dir: &PathBuf) -> PathBuf {
+pub fn context_file(dir: &Path) -> PathBuf {
     dir.join("context.log")
 }
 
-pub fn reset(dir: &PathBuf) {
+pub fn reset(dir: &Path) {
     let _ = fs::write(context_file(dir), "");
 }
 
 // Append one side of a turn.   Lines are trimmed to a bounded length and any
 // newlines flattened so the log keeps one exchange per line: a raw sentence
 // could otherwise span dozens of lines and push later context past the cap.
-pub fn append(dir: &PathBuf, role: &str, text: &str) {
-    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(context_file(dir)) else {
+pub fn append(dir: &Path, role: &str, text: &str) {
+    let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(context_file(dir))
+    else {
         return;
     };
     let limited: String = text.chars().take(700).collect();
-    let cleaned = limited.replace('\n', " ").replace('\r', " ");
+    let cleaned: String = limited
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
     let _ = writeln!(f, "{}: {}", role, cleaned);
 }
 
 // Pull back the most recent `max` lines of the log, oldest first.   Nothing
 // clever here: the file may be huge after a long session, so callers should
 // keep `max` small.
-pub fn last_turns(dir: &PathBuf, max: usize) -> Vec<String> {
+pub fn last_turns(dir: &Path, max: usize) -> Vec<String> {
     let Ok(raw) = fs::read_to_string(context_file(dir)) else {
         return Vec::new();
     };
@@ -46,7 +53,7 @@ pub fn last_turns(dir: &PathBuf, max: usize) -> Vec<String> {
 // Build the user prompt for a request, optionally glueing the recent history
 // onto the end.   The separator line is unashamedly visible: the model should
 // know those lines are transcript, not part of its instructions.
-pub fn with_context(dir: &PathBuf, enabled: bool, text: &str) -> String {
+pub fn with_context(dir: &Path, enabled: bool, text: &str) -> String {
     if enabled {
         let turns = last_turns(dir, 10);
         if !turns.is_empty() {

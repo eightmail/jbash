@@ -122,16 +122,24 @@ pub fn load() -> Config {
     }
     // Environment overrides, applied in order of precedence.
     if let Ok(v) = env::var("JBASH_API_URL") {
-        if !v.is_empty() { cfg.api_url = v; }
+        if !v.is_empty() {
+            cfg.api_url = v;
+        }
     }
     if let Ok(v) = env::var("JBASH_MODEL") {
-        if !v.is_empty() { cfg.model = v; }
+        if !v.is_empty() {
+            cfg.model = v;
+        }
     }
     if let Ok(v) = env::var("JBASH_THEME") {
-        if !v.is_empty() { cfg.theme = v.to_ascii_lowercase(); }
+        if !v.is_empty() {
+            cfg.theme = v.to_ascii_lowercase();
+        }
     }
     if let Ok(v) = env::var("JBASH_SANDBOX") {
-        if !v.is_empty() { cfg.sandbox = parse_bool(&v); }
+        if !v.is_empty() {
+            cfg.sandbox = parse_bool(&v);
+        }
     }
     cfg
 }

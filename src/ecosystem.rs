@@ -168,7 +168,11 @@ fn parse_plugin(p: &Path) -> Option<Plugin> {
         command,
         label: str_field(&v, "label").unwrap_or_default(),
         color: str_field(&v, "color").unwrap_or_else(|| "2".into()),
-        timeout: v.get("timeout").and_then(|x| x.as_u64()).unwrap_or(2).min(10),
+        timeout: v
+            .get("timeout")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(2)
+            .min(10),
     })
 }
 

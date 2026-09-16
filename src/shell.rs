@@ -152,7 +152,10 @@ fn prompt_script(theme: &Theme, plugins: &[Plugin], sandboxed: bool) -> String {
     let picked: Vec<&Plugin> = if theme.plugins.is_empty() {
         plugins.iter().collect()
     } else {
-        plugins.iter().filter(|p| theme.plugins.contains(&p.name)).collect()
+        plugins
+            .iter()
+            .filter(|p| theme.plugins.contains(&p.name))
+            .collect()
     };
     for p in &picked {
         segs.push(format!(
@@ -257,7 +260,6 @@ command_not_found_handle() {
 }
 "#;
 
-
 // Assemble the full rc file that gets dropped into the runtime directory and
 // passed to bash via --rcfile on every interactive start. The contract with
 // the user's own config is sacred: their ~/.bashrc is sourced verbatim first,
@@ -288,6 +290,9 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
          JBASH_CONFIRM={confirm}\n\n\
          {user_rc}\n\
          case $- in *i*) ;; *) return ;; esac\n\n\
+         # The Rust toolchain (cargo, rustfmt, clippy) is commonly installed\n\
+         # outside PATH; surface it inside jbash sessions when it exists.\n\
+         [ -d \"$HOME/.cargo/bin\" ] && export PATH=\"$HOME/.cargo/bin:$PATH\"\n\n\
          mkdir -p \"$JBASH_DIR\" 2>/dev/null\n\
          : > \"$JBASH_DIR/last-err.log\" 2>/dev/null\n\
          # Tee stderr into last-err.log so `fix` can show the failing tail.\n\
@@ -297,7 +302,12 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
         user_rc = "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi",
         prompt = {
             let (theme, plugins) = ecosystem::load(cfg);
-            format!("{}{}{}", prompt_script(&theme, &plugins, cfg.sandbox), SEGMENTS_BASH, PROMPT_TAIL)
+            format!(
+                "{}{}{}",
+                prompt_script(&theme, &plugins, cfg.sandbox),
+                SEGMENTS_BASH,
+                PROMPT_TAIL
+            )
         },
         helpers = HELPERS_BASH,
     );
@@ -311,14 +321,14 @@ pub fn write_rc(cfg: &Config, dir: &Path) -> io::Result<PathBuf> {
 // to the pty (no ISIG/ICANON preprocessing in the wrapper). The saved
 // termios is handed back so we can restore it when the session ends.
 fn set_raw(fd: BorrowedFd<'_>) -> io::Result<term::Termios> {
-    let orig = term::tcgetattr(&fd)?;
+    let orig = term::tcgetattr(fd)?;
     let mut raw = orig.clone();
     term::cfmakeraw(&mut raw);
     // Raw mode would normally disable output post-processing entirely, which
     // breaks line endings on the pty master in a couple of terminal emulators;
     // force OPOST+ONLCR back on so \n still becomes \r\n.
     raw.output_flags |= term::OutputFlags::OPOST | term::OutputFlags::ONLCR;
-    term::tcsetattr(&fd, term::SetArg::TCSANOW, &raw)?;
+    term::tcsetattr(fd, term::SetArg::TCSANOW, &raw)?;
     Ok(orig)
 }
 
@@ -396,7 +406,10 @@ impl RawGuard {
     fn enable(fd: i32) -> Option<Self> {
         let bfd = unsafe { BorrowedFd::borrow_raw(fd) };
         let saved = set_raw(bfd).ok()?;
-        Some(RawGuard { fd, saved: Some(saved) })
+        Some(RawGuard {
+            fd,
+            saved: Some(saved),
+        })
     }
 }
 
@@ -458,14 +471,17 @@ pub const SYS_FIX: &str = "A shell command failed. Reply with the corrected comm
 pub fn interactive(cfg: &Config) -> i32 {
     let dir = config::data_dir();
     let _ = fs::create_dir_all(&dir);
-// AI interception is on by default each session; `ai off` flips state.
+    // AI interception is on by default each session; `ai off` flips state.
     let _ = fs::write(dir.join("state"), "on");
     // Persist the sandbox choice for the session too.   The rc helpers read it
     // so every `ai`/`ask`/`fix` call the shell makes re-applies exactly the
     // --sleeper/--activated the user launched with (default: sandboxed).
     // Named "sandbox-mode" on purpose: $JBASH_DIR/sandbox is already the
     // scratch tree that the tool sandbox creates, and the two must not clash.
-    let _ = fs::write(dir.join("sandbox-mode"), if cfg.sandbox { "1" } else { "0" });
+    let _ = fs::write(
+        dir.join("sandbox-mode"),
+        if cfg.sandbox { "1" } else { "0" },
+    );
     // A fresh interactive session starts with an empty transcript. Context
     // across sessions would just confuse the model with stale topics.
     context::reset(&dir);
@@ -510,7 +526,13 @@ pub fn interactive(cfg: &Config) -> i32 {
             code
         }
         Ok(ForkResult::Child) => {
-            child_setup(shell, master_fd.as_raw_fd(), slave_fd.as_raw_fd(), &dir, &rc_path);
+            child_setup(
+                shell,
+                master_fd.as_raw_fd(),
+                slave_fd.as_raw_fd(),
+                &dir,
+                &rc_path,
+            );
             127
         }
         Err(e) => {
@@ -524,13 +546,7 @@ pub fn interactive(cfg: &Config) -> i32 {
 // controlling terminal, wire the standard fds to the slave, and exec bash with
 // the generated rc. The master fd is explicitly closed so bash doesn't keep
 // a copy around that would never let the pty see EOF afterwards.
-fn child_setup(
-    shell: String,
-    master: i32,
-    slave: i32,
-    dir: &Path,
-    rc_path: &Path,
-) {
+fn child_setup(shell: String, master: i32, slave: i32, dir: &Path, rc_path: &Path) {
     let _ = unsafe { libc::setsid() };
     let _ = unsafe { libc::ioctl(slave, libc::TIOCSCTTY, 0) };
     let _ = dup2(slave, 0);
@@ -565,8 +581,16 @@ fn parent_loop(master: i32, child: Pid) -> i32 {
         unsafe { sync_winsize(master, 0) };
 
         let mut fds = [
-            libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: master,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, 200) };
         if r < 0 {
