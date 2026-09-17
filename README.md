@@ -127,6 +127,7 @@ config directory each time a session starts:
 |---------------------------------------|------------------------------|
 | `~/.config/jbash/themes/<name>.json`  | prompt layouts               |
 | `~/.config/jbash/plugins/<name>.json` | extra prompt segments        |
+| `~/.config/jbash/prompts.json`        | editable `--activated` prompts (auto-created) |
 
 If you keep your dotfiles elsewhere, point `JBASH_CONFIG` at your own tree and
 the whole lookup moves there.
@@ -208,8 +209,8 @@ tar -xzf "jbash-${ver}-${arch}-unknown-linux-gnu.tar.gz"
 install -Dm755 jbash ~/.local/bin/jbash
 ```
 
-The `mkdir -p ~/.local/bin && install -m 755 jbash ~/.local/bin/jbash` works on both 
-GNU and BSD `install` (BSD has no `-D`), so the same last two lines work on macOS. 
+The `mkdir -p ~/.local/bin && install -m 755 jbash ~/.local/bin/jbash` works on both
+GNU and BSD `install` (BSD has no `-D`), so the same last two lines work on macOS.
 Note the published artifacts are Linux-only for now; on macOS, build from source below.
 
 ### With the install script
@@ -318,9 +319,15 @@ jbash keeps its session state there:
 ~/.jbash/last-status   exit status of the last command (used by fix)
 ~/.jbash/last-err.log  stderr tail of the last failed command (used by fix)
 ~/.jbash/context.log   recent ai/ask turns, used as AI context
-~/.jbash/sandbox-mode  session mode: '1' sandboxed (default) | '0' activated
-~/.jbash/sandbox/      scratch HOME + tmpdir for sandboxed AI tool commands
-```
+ ~/.jbash/sandbox-mode  session mode: '1' sandboxed (default) | '0' activated
+ ~/.jbash/sandbox/      scratch HOME + tmpdir for sandboxed AI tool commands
+ ```
+
+Those are jbash's own runtime files. In particular `context.log` is the AI
+session transcript and lives on its own — it never merges into bash's readline
+history. Up-arrow and `.bash_history` keep covering only the commands *you*
+type; the model conversation is tracked separately, so a day of `ask` chatting
+never pollutes the history you search with `Ctrl-R`.
 
 ## How it works
 
@@ -393,11 +400,12 @@ so the `run_shell` tool is confined by three layered guards (`src/sandbox.rs`):
    `.pypirc`, kubeconfigs, Docker credentials, `.env` files, shell history,
    `/etc/shadow` and friends. A hit refuses the command outright and the
    reason is relayed to the model so it can rephrase.
-3. **Output redaction.** Even for commands that run, the captured stdout and
-   stderr are swept for secret-shaped content: PEM/PGP private key blocks,
-   AWS access key ids, and `key=value` assignments for well-known secret
-   names: and blurred to `[REDACTED …]` before the result is given to the
-   model.
+3. **Output redaction (sandboxed mode).** For commands that do run, the
+   captured stdout and stderr are swept for secret-shaped content: PEM/PGP
+   private key blocks, AWS access key ids, and `key=value` assignments for
+   well-known secret names. Hits are blurred to `[REDACTED …]` before the
+   result reaches the model. `--activated` turns this off together with the
+   rest of the sandbox.
 
 Two deliberate caveats. First, these layers are heuristics, not a kernel
 boundary: jbash runs without privileges and (on common hardened hosts)
@@ -410,7 +418,26 @@ running jbash on a machine you trust. Second, the interactive confirmation
 path is unchanged by design: when *you* press `y` to run an `ai`-suggested
 command, it executes in your real shell with your real environment, exactly
 as if you had typed it. Set `sandbox=0` in `~/.jbash_rc` (or
-`JBASH_SANDBOX=0`) to run tool commands unsandboxed.
+ `JBASH_SANDBOX=0`) to run tool commands unsandboxed.
+
+**Where sandboxed writes actually land.** A tool command that writes through
+`~`, `$HOME` or `$TMPDIR` never touches your real tree: the paths resolve
+inside the scratch directory the sandbox keeps under the runtime directory,
+reused across sessions but holding nothing you own:
+
+| Path the model writes through | Actually stored at                |
+|-------------------------------|-----------------------------------|
+| `~` / `$HOME`                 | `~/.jbash/sandbox/home/`          |
+| `$TMPDIR`                     | `~/.jbash/sandbox/tmp/`           |
+
+So `ask` "save a testfile to my home" creates
+`~/.jbash/sandbox/home/testfile` and your real home is untouched. This is why
+the model's own `ls ~` can show a file that is missing from your `ls ~`: the
+model is listing the scratch home, not yours. Only two cases break the
+pattern: explicit absolute paths (say `/home/you/…`) reach the real
+filesystem because the sandbox has no namespaces (see the caveats above), and
+the interactive confirmation path (`y` on an `ai`/`fix` suggestion) runs in
+your real shell by design.
 
 **NOTE:** This may be obvious, but please take care to use *https* in the
 config when connectng to a remote LLM endpoint, so that data cannot be
@@ -431,6 +458,33 @@ whole session:
   every call.   (The original `--sandbox` / `--insecure` spellings still work
   as deprecated aliases.)
 
+**Fine-tuning the activated prompts.**   The built-in strict instructions are
+reserved for sandboxed mode.   `--activated` drives the model from
+`~/.config/jbash/prompts.json` instead: the file is created automatically the
+first time an activated session runs, prefilled with the same wording, and you
+can edit the `cmd`, `ask` and `fix` strings to relax (or tighten) how the model
+behaves while unsandboxed.   A missing file, invalid JSON, or a missing key
+silently falls back to the built-in wording, so a botched edit never kills the
+prompt.
+
+**What actually differs.** Neither mode is a filesystem jail: without kernel
+namespaces neither one can hide the directory you are standing in, so both can
+read it (and walk up with `../`). The difference is entirely about secrets and
+the environment:
+
+| Behaviour | `--sleeper` (default) | `--activated` |
+|-----------|----------------------|---------------|
+| Current directory tree | fully readable | fully readable |
+| `~` / `$HOME` | redirected to an empty scratch dir | your real home |
+| Environment | small allowlist only (no `SSH_AUTH_SOCK`, tokens, keys) | full inherited environment |
+| Commands that read secrets | vetoed before they run | allowed |
+| Secret-shaped output | redacted to `[REDACTED …]` | left untouched |
+| Kernel isolation | none | none |
+
+In short: `--sleeper` reduces the blast radius around credentials and exported
+variables, while `--activated` removes even that. That is why the latter warns
+at startup and shows a red dot.
+
 **Mode indicator.**   There is always a dot in the prompt, glued right behind
 the prompt name:
 
@@ -448,7 +502,8 @@ In the sandboxed mode the reads stand firm even if the model tries them: a
 tool command that touches `.ssh`, private key files, cloud credential stores,
 `.git-credentials`, `.env` or the other listed targets is refused before it
 runs (with the reason fed back to the model), and whatever output *does* come
-back passes the redaction sweep regardless of mode.
+back is redacted first. In `--activated` mode none of that applies: the veto,
+the environment scrub and the redaction are all switched off, by design.
 
 ## Troubleshooting
 

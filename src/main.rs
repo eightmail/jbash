@@ -9,6 +9,7 @@ mod config;
 mod context;
 mod ecosystem;
 mod llm;
+mod prompts;
 mod sandbox;
 mod shell;
 
@@ -48,7 +49,12 @@ fn append_context(role_a: &str, text_a: &str, role_b: &str, text_b: &str) {
 fn cmd_ai(cfg: &config::Config, text: &str) -> i32 {
     let dir = config::data_dir();
     let user = context::with_context(&dir, cfg.context, text);
-    match llm::chat_tools(cfg, shell::SYS_CMD, &user, "ai") {
+    match llm::chat_tools(
+        cfg,
+        &prompts::for_mode(cfg, prompts::Kind::Cmd),
+        &user,
+        "ai",
+    ) {
         Ok(raw) => {
             let cmd = llm::extract_command(&raw);
             if cmd.is_empty() {
@@ -71,7 +77,12 @@ fn cmd_ai(cfg: &config::Config, text: &str) -> i32 {
 // session transcript. That keeps every question self-contained so an old
 // answer never leaks into (and distorts) the next one.
 fn cmd_ask(cfg: &config::Config, text: &str) -> i32 {
-    match llm::chat_tools(cfg, shell::SYS_ASK, text, "ask") {
+    match llm::chat_tools(
+        cfg,
+        &prompts::for_mode(cfg, prompts::Kind::Ask),
+        text,
+        "ask",
+    ) {
         Ok(raw) => {
             let ans = llm::clean_answer(&raw);
             println!("{ans}");
@@ -108,7 +119,12 @@ fn cmd_fix(cfg: &config::Config, command_text: &str, status_text: &str) -> i32 {
         "The command: {command_text}\nExit status: {status_text}\nstderr from the failed run:\n{err_tail}\n(cwd: {cwd})"
     );
     let user = context::with_context(&dir, cfg.context, &user);
-    match llm::chat(cfg, shell::SYS_FIX, &user, "fix") {
+    match llm::chat(
+        cfg,
+        &prompts::for_mode(cfg, prompts::Kind::Fix),
+        &user,
+        "fix",
+    ) {
         Ok(raw) => {
             let cmd = llm::extract_command(&raw);
             if cmd.is_empty() {
