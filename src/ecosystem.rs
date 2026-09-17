@@ -74,8 +74,9 @@ fn builtin_theme(name: &str) -> Theme {
 
 // Where the JSON files are looked for.   JBASH_CONFIG is the escape hatch for
 // people who keep their dotfiles in sync across machines and want the whole
-// jbash config nested under their own tree.
-fn conf_dir() -> PathBuf {
+// jbash config nested under their own tree.   Shared with prompts.rs so the
+// tuning files and the theme files always sit in the same directory.
+pub(crate) fn conf_dir() -> PathBuf {
     if let Ok(d) = std::env::var("JBASH_CONFIG") {
         if !d.is_empty() {
             return PathBuf::from(d);

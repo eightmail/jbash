@@ -1,0 +1,93 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.
+#   git tag v0.8.0-alpha && git push origin v0.8.0-alpha
+# The tag must match the `version` in Cargo.toml; the build fails otherwise so
+# a release can never ship a binary whose --version disagrees with its tag.
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          crate_version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "crate=${crate_version}  tag=${tag_version}"
+          if [ "${crate_version}" != "${tag_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}"
+            exit 1
+          fi
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          name="jbash-${ver}-${{ matrix.arch }}-unknown-linux-gnu"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/jbash" dist/jbash
+          tar -C dist -czf "${name}.tar.gz" jbash
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          ls -l "${name}.tar.gz" "${name}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: jbash-*.tar.gz*
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          # Hyphenated versions (0.8.0-alpha) are shipped as prereleases.
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -141,6 +141,19 @@ fn glyph_color(theme: &str) -> String {
     }
 }
 
+// Pin a glyph to the same visual width as the wide frames so the spinner line
+// never shudders side to side.   Kana and the lightning bolt render two
+// terminal columns wide; everything else in the frame list (digits, box
+// drawing, math operators, Greek letters) is a single column, so it gets one
+// trailing space to match.
+fn pin_width(glyph: char) -> String {
+    if matches!(glyph, '\u{3040}'..='\u{30FF}' | '⚡') {
+        glyph.to_string()
+    } else {
+        format!("{glyph} ")
+    }
+}
+
 // The animated status line. Two properties make it behave in the way people
 // actually want:
 //   - it is drawn straight to /dev/tty, never to stdout/stderr, so captured
@@ -175,7 +188,18 @@ impl Status {
             let model = model.to_string();
             let glyph = glyph_color.to_string();
             thread::spawn(move || {
-                let frames = ['⚡', '⠹', '┼', 'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'サ', 'シ', 'ス', 'セ', 'ソ', 'タ', 'チ', 'ツ', 'テ', 'ト', 'ナ', 'ニ', 'ヌ', 'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', 'ホ', 'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ', 'ユ', 'ヨ', 'ラ', 'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン', 'ァ', 'ィ', 'ゥ', 'ェ', 'ォ', 'ッ', 'ャ', 'ュ', 'ョ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '#'];
+                let frames = [
+                    '⚡', '⠹', '┼', 'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ',
+                    'サ', 'シ', 'ス', 'セ', 'ソ', 'タ', 'チ', 'ツ', 'テ', 'ト', 'ナ', 'ニ', 'ヌ',
+                    'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', 'ホ', 'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ',
+                    'ユ', 'ヨ', 'ラ', 'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン', 'ァ', 'ィ', 'ゥ', 'ェ',
+                    'ォ', 'ッ', 'ャ', 'ュ', 'ョ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+                    '#', // Math operators and relations, then the Greek alphabet.
+                    '×', '÷', '±', '∓', '≠', '≈', '≡', '∝', '∀', '∃', '∄', '∴', '∵', '∈', '∉', '⊂',
+                    '⊆', '∪', '∩', '∅', '∑', '∏', '∫', '∮', '∂', '∇', '∞', '√', '⊥', '∠', '∥', 'α',
+                    'β', 'γ', 'δ', 'ε', 'θ', 'λ', 'μ', 'π', 'σ', 'φ', 'ω', 'Γ', 'Δ', 'Θ', 'Λ', 'Ξ',
+                    'Π', 'Σ', 'Φ', 'Ψ', 'Ω',
+                ];
                 let mut rng = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos() as u64)
@@ -186,14 +210,7 @@ impl Status {
                     rng ^= rng >> 7;
                     rng ^= rng << 17;
                     let ch = frames[(rng as usize) % frames.len()];
-                    // ASCII glyphs (digits, '#') are one column wide while the
-                    // katakana are two; pad them so the line never shudders
-                    // left and right from frame to frame.
-                    let g = if ch.is_ascii() {
-                        format!("{ch} ")
-                    } else {
-                        ch.to_string()
-                    };
+                    let g = pin_width(ch);
                     let ext = d.lock().map(|x| x.clone()).unwrap_or_default();
                     let line = format!(
                         "\r\x1b[{}m{}\x1b[0m {} (\x1b[1m{}\x1b[0m)\x1b[2m{}\x1b[0m\x1b[K",
@@ -614,6 +631,19 @@ def stripfence: gsub("^```[a-z]*\n?"; "") | gsub("\n?```$"; "") | gsub("`"; "");
 // request forever, and the result is flattened into a compact "exit / stdout /
 // stderr" blob the model can read.   Length is capped: tool output exists to
 // inform the answer, not to be pasted back verbatim.
+// Tool output is scanned for secret-shaped content only while the sandbox is
+// on.   `--activated` is explicitly the "hand the model the full session"
+// switch, so scrubbing there would just be surprising: the user asked for the
+// untrimmed view.
+fn scrub(cfg: &Config, bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if cfg.sandbox {
+        crate::sandbox::redact(&text)
+    } else {
+        text.into_owned()
+    }
+}
+
 fn run_shell(cfg: &Config, cmd: &str, timeout_secs: u64) -> String {
     let cmd = cmd.trim();
     if cmd.is_empty() {
@@ -666,18 +696,11 @@ fn run_shell(cfg: &Config, cmd: &str, timeout_secs: u64) -> String {
     s.push('\n');
     if !out.stdout.is_empty() {
         s.push_str("stdout:\n");
-        // Output passes through the redaction sweep even in unsandboxed mode:
-        // it is cheap, and a key that leaked once stays out of the model's
-        // hands at zero extra risk.
-        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(
-            &out.stdout,
-        )));
+        s.push_str(&scrub(cfg, &out.stdout));
     }
     if !out.stderr.is_empty() {
         s.push_str("stderr:\n");
-        s.push_str(&crate::sandbox::redact(&String::from_utf8_lossy(
-            &out.stderr,
-        )));
+        s.push_str(&scrub(cfg, &out.stderr));
     }
     let s: String = s.chars().take(6000).collect();
     let s = s.trim_end().to_string();
@@ -989,5 +1012,53 @@ mod tool_tests {
             "key block made it to output: {out}"
         );
         assert!(out.contains("[REDACTED private key]"), "got: {out}");
+    }
+
+    #[test]
+    fn activated_leaves_output_unredacted() {
+        prep();
+        let cfg = Config {
+            sandbox: false,
+            ..Config::default()
+        };
+        let out = run_shell(&cfg, "printf '%s' 'AKIAIOSFODNN7EXAMPLE'", 5);
+        assert!(
+            out.contains("AKIAIOSFODNN7EXAMPLE"),
+            "activated mode must not scrub output: {out}"
+        );
+        assert!(!out.contains("[REDACTED"), "unexpected redaction: {out}");
+    }
+}
+
+#[cfg(test)]
+mod spinner_tests {
+    use super::pin_width;
+
+    #[test]
+    fn kana_and_bolt_are_bare_and_double_width() {
+        assert_eq!(pin_width('ア'), "ア");
+        assert_eq!(pin_width('ト'), "ト");
+        assert_eq!(pin_width('⚡'), "⚡");
+    }
+
+    #[test]
+    fn narrow_glyphs_pad_to_two_cells() {
+        // Digits, box drawing, the new math operators and the Greek letters
+        // are all single column and must be pinned so the line never bounces.
+        // The lightning bolt is double width and lives in the test above.
+        for ch in [
+            '#', '0', '┼', '⠹', '×', '÷', '≠', '∅', '∑', '⊥', '∠', 'α', 'Ω',
+        ] {
+            let g = pin_width(ch);
+            assert_eq!(
+                g.chars().count(),
+                2,
+                "narrow glyph {ch} must pad to 2 cells"
+            );
+            assert!(
+                g.ends_with(' '),
+                "narrow glyph {ch} must carry a trailing space"
+            );
+        }
     }
 }
